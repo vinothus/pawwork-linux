@@ -1,0 +1,931 @@
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      phase:
+        description: "Release mode (submit/finalize for production, full for debugging)"
+        required: false
+        type: choice
+        options:
+          - submit
+          - finalize
+          - full
+        default: submit
+      channel:
+        description: "Build channel"
+        required: false
+        type: choice
+        options:
+          - dev
+          - prod
+        default: dev
+      target:
+        description: "Release target"
+        required: false
+        type: choice
+        options:
+          - macos
+          - windows
+        default: macos
+      arch:
+        description: "Target architecture"
+        required: false
+        type: choice
+        options:
+          - arm64
+          - x64
+        default: arm64
+      source_run_id:
+        description: "Run ID from the submit phase"
+        required: false
+        type: string
+      source_run_attempt:
+        description: "Run attempt from the submit phase"
+        required: false
+        type: string
+      source_ref:
+        description: "Git ref from the submit phase"
+        required: false
+        type: string
+      source_sha:
+        description: "Git SHA from the submit phase"
+        required: false
+        type: string
+      source_workflow_ref:
+        description: "Workflow tag created during the submit phase"
+        required: false
+        type: string
+      source_workflow_sha:
+        description: "Workflow commit SHA loaded during the submit phase"
+        required: false
+        type: string
+      submission_id:
+        description: "Apple notarization submission ID"
+        required: false
+        type: string
+
+# Release metadata is a read-modify-write upload to the same latest*.yml asset.
+# Queue same target/phase runs across arch to avoid release asset clobbering.
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.source_ref || github.ref_name }}-${{ inputs.phase || 'submit' }}-${{ inputs.channel || 'dev' }}-${{ inputs.target || 'macos' }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  select-build-target:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+      target: ${{ steps.select.outputs.target }}
+      arch: ${{ steps.select.outputs.arch }}
+    steps:
+      - name: Validate release source branch
+        run: |
+          set -euo pipefail
+
+          if [ "$PHASE" = "finalize" ]; then
+            if [ "$SOURCE_REF" != "$EXPECTED_SOURCE_REF" ]; then
+              echo "Finalize source must be $EXPECTED_SOURCE_REF, got ${SOURCE_REF:-<empty>}"
+              exit 1
+            fi
+          elif [ "$GITHUB_REF" != "refs/heads/$EXPECTED_SOURCE_REF" ]; then
+            echo "Releases must start from $EXPECTED_SOURCE_REF, got $GITHUB_REF"
+            exit 1
+          fi
+        env:
+          EXPECTED_SOURCE_REF: main
+          PHASE: ${{ inputs.phase || 'submit' }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+
+      - id: select
+        run: |
+          set -euo pipefail
+
+          target="${INPUT_TARGET:-macos}"
+          arch="${INPUT_ARCH:-arm64}"
+          phase="${INPUT_PHASE:-submit}"
+
+          case "$target" in
+            macos)
+              case "$arch" in
+                arm64)
+                  host="macos-latest"
+                  platform_flag="--mac --arm64"
+                  ;;
+                x64)
+                  host="macos-15-intel"
+                  platform_flag="--mac --x64"
+                  ;;
+                *)
+                  echo "Unsupported macOS arch: $arch"
+                  exit 1
+                  ;;
+              esac
+              ;;
+            windows)
+              if [ "$phase" = "finalize" ]; then
+                echo "Windows releases do not use the macOS notarization finalize phase"
+                exit 1
+              fi
+              if [ "$arch" != "x64" ]; then
+                echo "Unsupported Windows arch: $arch"
+                exit 1
+              fi
+              host="windows-latest"
+              platform_flag="--win"
+              ;;
+            *)
+              echo "Unsupported release target: $target"
+              exit 1
+              ;;
+          esac
+
+          matrix=$(python3 - <<PY
+          import json
+          print(json.dumps({
+              "include": [{
+                  "host": "$host",
+                  "target": "$target",
+                  "platform_flag": "$platform_flag",
+                  "arch_label": "$arch",
+              }]
+          }))
+          PY
+          )
+
+          {
+            echo "target=$target"
+            echo "arch=$arch"
+            echo "matrix=$matrix"
+          } >> "$GITHUB_OUTPUT"
+        env:
+          INPUT_TARGET: ${{ inputs.target || 'macos' }}
+          INPUT_ARCH: ${{ inputs.arch || 'arm64' }}
+          INPUT_PHASE: ${{ inputs.phase || 'submit' }}
+
+  create-snapshot-tag:
+    needs:
+      - select-build-target
+    if: ${{ inputs.phase == 'submit' && needs.select-build-target.outputs.target == 'macos' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      workflow_ref: ${{ steps.create.outputs.workflow_ref }}
+      workflow_sha: ${{ steps.create.outputs.workflow_sha }}
+    steps:
+      - id: create
+        run: |
+          set -euo pipefail
+
+          workflow_ref="workflow-snapshot-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ needs.select-build-target.outputs.target }}-${{ needs.select-build-target.outputs.arch }}"
+          gh api \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${GITHUB_REPOSITORY}/git/refs" \
+            -f ref="refs/tags/${workflow_ref}" \
+            -f sha="${GITHUB_SHA}"
+          echo "workflow_ref=$workflow_ref" >> "$GITHUB_OUTPUT"
+          echo "workflow_sha=$GITHUB_WORKFLOW_SHA" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  build-electron:
+    needs:
+      - select-build-target
+      - create-snapshot-tag
+    if: ${{ always() && needs.select-build-target.result == 'success' && (needs.create-snapshot-tag.result == 'success' || needs.create-snapshot-tag.result == 'skipped') }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.select-build-target.outputs.matrix) }}
+
+    runs-on: ${{ matrix.host }}
+    permissions:
+      # actions: write lets the prod publish step dispatch mirror-release-to-r2.yml
+      # via `gh workflow run` (workflow_dispatch is the GITHUB_TOKEN anti-recursion
+      # exception; a GITHUB_TOKEN-driven publish does NOT fire release:published).
+      actions: write
+      contents: write
+
+    steps:
+      - name: Validate selected target
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "$SELECTED_TARGET" != "${{ matrix.target }}" ]; then
+            echo "Target mismatch: expected $SELECTED_TARGET, got ${{ matrix.target }}"
+            exit 1
+          fi
+
+          if [ "$SELECTED_ARCH" != "${{ matrix.arch_label }}" ]; then
+            echo "Arch mismatch: expected $SELECTED_ARCH, got ${{ matrix.arch_label }}"
+            exit 1
+          fi
+        env:
+          SELECTED_TARGET: ${{ needs.select-build-target.outputs.target }}
+          SELECTED_ARCH: ${{ needs.select-build-target.outputs.arch }}
+
+      - name: Validate finalize inputs
+        if: ${{ inputs.phase == 'finalize' }}
+        run: |
+          set -euo pipefail
+
+          for value_name in SOURCE_RUN_ID SOURCE_RUN_ATTEMPT SOURCE_REF SOURCE_SHA SOURCE_WORKFLOW_REF SOURCE_WORKFLOW_SHA SOURCE_ARCH SUBMISSION_ID; do
+            if [ -z "${!value_name}" ]; then
+              echo "$value_name is required for finalize"
+              exit 1
+            fi
+          done
+
+          if [ "$SOURCE_ARCH" != "${{ matrix.arch_label }}" ]; then
+            echo "Finalize arch mismatch: expected $SOURCE_ARCH, got ${{ matrix.arch_label }}"
+            exit 1
+          fi
+
+          if [ "$GITHUB_REF_NAME" != "$SOURCE_WORKFLOW_REF" ]; then
+            echo "Finalize workflow ref mismatch: expected $SOURCE_WORKFLOW_REF, got $GITHUB_REF_NAME"
+            exit 1
+          fi
+
+          if [ "$GITHUB_WORKFLOW_SHA" != "$SOURCE_WORKFLOW_SHA" ]; then
+            echo "Finalize workflow SHA mismatch: expected $SOURCE_WORKFLOW_SHA, got $GITHUB_WORKFLOW_SHA"
+            exit 1
+          fi
+        env:
+          SOURCE_ARCH: ${{ inputs.arch }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SOURCE_RUN_ATTEMPT: ${{ inputs.source_run_attempt }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          SOURCE_WORKFLOW_REF: ${{ inputs.source_workflow_ref }}
+          SOURCE_WORKFLOW_SHA: ${{ inputs.source_workflow_sha }}
+          SUBMISSION_ID: ${{ inputs.submission_id }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        if: ${{ inputs.phase != 'finalize' }}
+        with:
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        if: ${{ inputs.phase == 'finalize' }}
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.source_sha }}
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "24"
+
+      - name: Enable pnpm
+        run: corepack enable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Prepare uv
+        if: ${{ inputs.phase != 'finalize' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          case "${{ matrix.target }}" in
+            macos) uv_platform="darwin" ;;
+            windows) uv_platform="win32" ;;
+            *) echo "Unsupported uv target: ${{ matrix.target }}"; exit 1 ;;
+          esac
+
+          pnpm exec tsx ./scripts/prepare-uv.ts --platform "$uv_platform" --arch "${{ matrix.arch_label }}"
+        working-directory: packages/desktop-electron
+
+      - name: Resolve packaged app paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm exec tsx ./scripts/packaged-app-env.ts "$OPENCODE_CHANNEL" "${{ matrix.arch_label }}" >> "$GITHUB_ENV"
+        working-directory: packages/desktop-electron
+        env:
+          OPENCODE_CHANNEL: ${{ inputs.channel || 'dev' }}
+
+      - name: Read desktop package version
+        id: package_version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./packages/desktop-electron/package.json').version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build Electron app
+        if: ${{ inputs.phase != 'finalize' }}
+        run: pnpm run build
+        working-directory: packages/desktop-electron
+        env:
+          OPENCODE_CHANNEL: ${{ inputs.channel || 'dev' }}
+
+      - name: Setup Apple API Key
+        if: runner.os == 'macOS'
+        run: printenv APPLE_API_KEY_CONTENT > $RUNNER_TEMP/apple-api-key.p8
+        env:
+          APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY }}
+
+      - name: Download existing updater metadata
+        # macOS finalize can run after notarization as a separate phase; Windows finalizes during full packaging.
+        if: ${{ inputs.channel != 'dev' && ((runner.os == 'macOS' && (inputs.phase == 'finalize' || inputs.phase == 'full') && inputs.arch == matrix.arch_label) || (runner.os == 'Windows' && inputs.phase == 'full')) }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          existing_dir="$RUNNER_TEMP/existing-latest-yml"
+          mkdir -p "$existing_dir"
+          tag="v${{ steps.package_version.outputs.version }}"
+
+          download_or_warn() {
+            local pattern="$1"
+            local err="$RUNNER_TEMP/${pattern}.err"
+            if gh release download "$tag" --pattern "$pattern" --dir "$existing_dir" --repo "$PUBLISH_OWNER/$PUBLISH_REPO" 2>"$err"; then
+              return 0
+            fi
+            if grep -qiE 'no assets to download|no matches found|no assets match|could not find any assets|release not found' "$err"; then
+              echo "No existing $pattern found; expected for first release."
+              return 0
+            fi
+            cat "$err" >&2
+            return 1
+          }
+
+          download_or_warn "$METADATA_FILE"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Import code signing certificate
+        if: runner.os == 'macOS'
+        run: |
+          KEYCHAIN_PATH=$RUNNER_TEMP/build.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+
+          # Create, unlock, and configure keychain
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Import certificate (-A = allow any app access)
+          echo "$P12_BASE64" | base64 --decode > $RUNNER_TEMP/cert.p12
+          security import $RUNNER_TEMP/cert.p12 -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          rm -f $RUNNER_TEMP/cert.p12
+
+          # Grant codesign access without UI prompt
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Add to search list so codesign can find it
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+          security default-keychain -s "$KEYCHAIN_PATH"
+
+          # Verify
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+        env:
+          P12_BASE64: ${{ secrets.CSC_LINK }}
+          P12_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+
+      - name: Package signed app
+        if: ${{ runner.os == 'macOS' && (inputs.phase == 'submit' || inputs.phase == 'full') }}
+        run: pnpm exec electron-builder --mac zip --${{ matrix.arch_label }} --publish never --config electron-builder.config.ts
+        working-directory: packages/desktop-electron
+        timeout-minutes: 30
+        env:
+          OPENCODE_CHANNEL: ${{ inputs.channel || 'dev' }}
+
+      - name: Smoke signed macOS app
+        if: ${{ runner.os == 'macOS' && (inputs.phase == 'submit' || inputs.phase == 'full') }}
+        run: |
+          set -euo pipefail
+
+          pnpm exec tsx ./scripts/ci-smoke.ts packaged "$OPENCODE_CHANNEL"
+        working-directory: packages/desktop-electron
+        timeout-minutes: 2
+        env:
+          OPENCODE_CHANNEL: ${{ inputs.channel || 'dev' }}
+          PAWWORK_CI_SMOKE_CDP: "true"
+
+      - name: Prepare signed app artifact
+        if: ${{ runner.os == 'macOS' && inputs.phase == 'submit' }}
+        run: |
+          set -euo pipefail
+
+          ARTIFACT_DIR="$RUNNER_TEMP/notarization-state"
+          mkdir -p "$ARTIFACT_DIR"
+          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "$ARTIFACT_DIR/signed-app.zip"
+
+          cat >"$ARTIFACT_DIR/notarization-metadata.json" <<EOF
+          {
+            "channel": "$OPENCODE_CHANNEL",
+            "arch": "${{ matrix.arch_label }}",
+            "app_name": "$APP_NAME",
+            "source_run_id": "${{ github.run_id }}",
+            "source_run_attempt": "${{ github.run_attempt }}",
+            "source_ref": "${{ github.ref_name }}",
+            "source_sha": "${{ github.sha }}",
+            "source_workflow_ref": "${{ needs.create-snapshot-tag.outputs.workflow_ref }}",
+            "source_workflow_sha": "${{ needs.create-snapshot-tag.outputs.workflow_sha }}"
+          }
+          EOF
+        working-directory: packages/desktop-electron
+        env:
+          OPENCODE_CHANNEL: ${{ inputs.channel || 'dev' }}
+
+      - name: Upload signed app artifact
+        if: ${{ runner.os == 'macOS' && inputs.phase == 'submit' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pawwork-signed-app-${{ inputs.channel || 'dev' }}-${{ matrix.arch_label }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/notarization-state/signed-app.zip
+            ${{ runner.temp }}/notarization-state/notarization-metadata.json
+
+      - name: Submit notarization
+        id: submit_notarization
+        if: ${{ runner.os == 'macOS' && (inputs.phase == 'submit' || inputs.phase == 'full') }}
+        run: |
+          set -euo pipefail
+
+          ZIP_PATH="$RUNNER_TEMP/notarize-${{ matrix.arch_label }}.zip"
+          auth_args=(--key "$APPLE_API_KEY" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER")
+
+          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "$ZIP_PATH"
+
+          submit_attempt=1
+          max_submit_attempts=3
+
+          while true; do
+            submit_out="$RUNNER_TEMP/notary-submit-$submit_attempt.json"
+            submit_err="$RUNNER_TEMP/notary-submit-$submit_attempt.err"
+
+            set +e
+            xcrun notarytool submit "$ZIP_PATH" "${auth_args[@]}" --no-wait --output-format json >"$submit_out" 2>"$submit_err"
+            status=$?
+            set -e
+
+            cat "$submit_err" || true
+            cat "$submit_out" || true
+
+            if [ "$status" -eq 0 ]; then
+              submission_id=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["id"])' "$submit_out")
+              echo "Submission ID: $submission_id"
+              break
+            fi
+
+            if [ "$submit_attempt" -ge "$max_submit_attempts" ]; then
+              echo "notarytool submit failed after $submit_attempt attempt(s)"
+              exit "$status"
+            fi
+
+            if grep -Eq 'NSURLErrorDomain Code=-1009|The Internet connection appears to be offline|No network route' "$submit_out" "$submit_err"; then
+              echo "Transient notarytool submit network error on attempt $submit_attempt/$max_submit_attempts, retrying after 60 seconds"
+              submit_attempt=$((submit_attempt + 1))
+              sleep 60
+              continue
+            fi
+
+            echo "Non-retryable notarytool submit failure on attempt $submit_attempt"
+            exit "$status"
+          done
+          echo "submission_id=$submission_id" >> "$GITHUB_OUTPUT"
+        working-directory: packages/desktop-electron
+        timeout-minutes: 30
+        env:
+          OPENCODE_CHANNEL: ${{ inputs.channel || 'dev' }}
+          APPLE_API_KEY: ${{ runner.temp }}/apple-api-key.p8
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+
+      - name: Delete Apple API Key after submit
+        if: always() && runner.os == 'macOS' && inputs.phase == 'submit'
+        run: rm -f "${{ runner.temp }}/apple-api-key.p8"
+
+      - name: Download signed app artifact
+        if: ${{ runner.os == 'macOS' && inputs.phase == 'finalize' && inputs.arch == matrix.arch_label }}
+        run: |
+          set -euo pipefail
+
+          DOWNLOAD_DIR="$RUNNER_TEMP/finalize-download"
+          ARTIFACT_NAME="pawwork-signed-app-${OPENCODE_CHANNEL}-${{ matrix.arch_label }}-${SOURCE_RUN_ID}-${SOURCE_RUN_ATTEMPT}"
+          mkdir -p "$DOWNLOAD_DIR"
+          gh run download "$SOURCE_RUN_ID" --repo "${GITHUB_REPOSITORY}" --name "$ARTIFACT_NAME" --dir "$DOWNLOAD_DIR"
+
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import sys
+
+          metadata_path = pathlib.Path(os.environ["DOWNLOAD_DIR"]) / "notarization-metadata.json"
+          metadata = json.loads(metadata_path.read_text())
+          expected = {
+              "channel": os.environ["OPENCODE_CHANNEL"],
+              "arch": os.environ["ARCH_LABEL"],
+              "source_run_id": os.environ["SOURCE_RUN_ID"],
+              "source_run_attempt": os.environ["SOURCE_RUN_ATTEMPT"],
+              "source_ref": os.environ["SOURCE_REF"],
+              "source_sha": os.environ["SOURCE_SHA"],
+              "source_workflow_ref": os.environ["SOURCE_WORKFLOW_REF"],
+              "source_workflow_sha": os.environ["SOURCE_WORKFLOW_SHA"],
+          }
+
+          mismatches = []
+          for key, expected_value in expected.items():
+              actual_value = metadata.get(key)
+              if actual_value != expected_value:
+                  mismatches.append(f"{key}: expected {expected_value!r}, got {actual_value!r}")
+
+          if mismatches:
+              print("Artifact metadata mismatch:")
+              for mismatch in mismatches:
+                  print(f"  - {mismatch}")
+              sys.exit(1)
+
+          PY
+
+          rm -rf "$APP_OUT_DIR"
+          mkdir -p "$APP_OUT_DIR"
+          ditto -x -k "$DOWNLOAD_DIR/signed-app.zip" "$APP_OUT_DIR"
+          echo "Restored $APP_NAME.app from artifact $ARTIFACT_NAME"
+        working-directory: packages/desktop-electron
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          ARCH_LABEL: ${{ matrix.arch_label }}
+          DOWNLOAD_DIR: ${{ runner.temp }}/finalize-download
+          OPENCODE_CHANNEL: ${{ inputs.channel || 'dev' }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SOURCE_RUN_ATTEMPT: ${{ inputs.source_run_attempt }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          SOURCE_WORKFLOW_REF: ${{ inputs.source_workflow_ref }}
+          SOURCE_WORKFLOW_SHA: ${{ inputs.source_workflow_sha }}
+
+      - name: Finalize notarization
+        if: ${{ runner.os == 'macOS' && (inputs.phase == 'finalize' || inputs.phase == 'full') && inputs.arch == matrix.arch_label }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "${INPUT_SUBMISSION_ID}" ]; then
+            submission_id="$INPUT_SUBMISSION_ID"
+          else
+            submission_id="$SUBMITTED_SUBMISSION_ID"
+          fi
+          if [ -z "$submission_id" ]; then
+            echo "submission_id is required"
+            exit 1
+          fi
+          auth_args=(--key "$APPLE_API_KEY" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER")
+          deadline=$((SECONDS + 5400))
+
+          while true; do
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "Timed out waiting for notarization for submission $submission_id during finalize"
+              exit 1
+            fi
+
+            info_out="$RUNNER_TEMP/notary-info.json"
+            info_err="$RUNNER_TEMP/notary-info.err"
+
+            set +e
+            xcrun notarytool info "$submission_id" "${auth_args[@]}" --output-format json >"$info_out" 2>"$info_err"
+            status=$?
+            set -e
+
+            cat "$info_err" || true
+
+            if [ "$status" -ne 0 ]; then
+              if grep -Eq 'NSURLErrorDomain Code=-1009|The Internet connection appears to be offline|No network route' "$info_out" "$info_err"; then
+                echo "Transient notarytool info network error during finalize, retrying after 60 seconds"
+                sleep 60
+                continue
+              fi
+
+              cat "$info_out" || true
+              echo "Non-retryable notarytool info failure during finalize"
+              exit "$status"
+            fi
+
+            cat "$info_out"
+
+            notarization_status=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["status"])' "$info_out")
+            echo "Current notarization status: $notarization_status"
+
+            if [ "$notarization_status" = "Accepted" ]; then
+              break
+            fi
+
+            if [ "$notarization_status" = "Invalid" ] || [ "$notarization_status" = "Rejected" ]; then
+              xcrun notarytool log "$submission_id" "${auth_args[@]}" || true
+              exit 1
+            fi
+
+            sleep 60
+          done
+
+          xcrun stapler staple -v "$APP_PATH"
+          xcrun stapler validate -v "$APP_PATH"
+        working-directory: packages/desktop-electron
+        timeout-minutes: 120
+        env:
+          OPENCODE_CHANNEL: ${{ inputs.channel || 'dev' }}
+          INPUT_SUBMISSION_ID: ${{ inputs.submission_id }}
+          SUBMITTED_SUBMISSION_ID: ${{ steps.submit_notarization.outputs.submission_id }}
+          APPLE_API_KEY: ${{ runner.temp }}/apple-api-key.p8
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+
+      - name: Delete Apple API Key after finalize
+        if: always() && runner.os == 'macOS' && (inputs.phase == 'finalize' || inputs.phase == 'full')
+        run: rm -f "${{ runner.temp }}/apple-api-key.p8"
+
+      # electron-builder creates the release when the tag has none, and it
+      # uploads a target's assets concurrently, so the first phase to publish for
+      # a tag can produce two drafts and split its assets between them. Claim the
+      # single draft here, before any upload, and fail fast on a split.
+      - name: Ensure a single release draft
+        if: ${{ inputs.channel != 'dev' && ((runner.os == 'macOS' && (inputs.phase == 'finalize' || inputs.phase == 'full') && inputs.arch == matrix.arch_label) || (runner.os == 'Windows' && inputs.phase == 'full')) }}
+        run: pnpm exec tsx ./scripts/ensure-release-draft.ts
+        working-directory: packages/desktop-electron
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ env.PUBLISH_OWNER }}/${{ env.PUBLISH_REPO }}
+          RELEASE_TAG: v${{ steps.package_version.outputs.version }}
+          # Same phase-tied commit the publisher pins the tag to, so the draft
+          # starts out targeting the commit its assets are built from.
+          RELEASE_TARGET_SHA: ${{ inputs.phase == 'finalize' && inputs.source_sha || github.sha }}
+
+      - name: Package notarized artifacts
+        if: ${{ runner.os == 'macOS' && (inputs.phase == 'finalize' || inputs.phase == 'full') && inputs.arch == matrix.arch_label }}
+        run: |
+          set -euo pipefail
+
+          pnpm exec tsx ./scripts/generate-icons.ts
+          pnpm exec electron-builder --mac dmg zip --${{ matrix.arch_label }} --prepackaged "$APP_PATH" --publish always --config.mac.sign=./script/skip-mac-sign.cjs --config.mac.notarize=false --config electron-builder.config.ts
+        working-directory: packages/desktop-electron
+        timeout-minutes: 30
+        env:
+          OPENCODE_CHANNEL: ${{ inputs.channel || 'dev' }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify notarized artifacts
+        if: ${{ runner.os == 'macOS' && (inputs.phase == 'finalize' || inputs.phase == 'full') && inputs.arch == matrix.arch_label }}
+        run: |
+          set -euo pipefail
+
+          verify_app_update_config() {
+            local config_path="$1"
+
+            if [ -z "$PUBLISH_REPO" ]; then
+              return 0
+            fi
+
+            if [ ! -f "$config_path" ]; then
+              echo "Expected app-update.yml at $config_path"
+              exit 1
+            fi
+
+            grep -qx "provider: github" "$config_path"
+            grep -qx "owner: $PUBLISH_OWNER" "$config_path"
+            grep -qx "repo: $PUBLISH_REPO" "$config_path"
+            grep -qx "channel: latest-v2" "$config_path"
+          }
+
+          verify_dir="$RUNNER_TEMP/verify-notarized-artifacts"
+          rm -rf "$verify_dir"
+          mkdir -p "$verify_dir"
+
+          dmg_count=$(find dist -maxdepth 1 -name '*.dmg' | wc -l | tr -d ' ')
+          if [ "$dmg_count" -eq 0 ]; then
+            echo "Expected at least one dmg artifact in dist/"
+            exit 1
+          fi
+
+          while IFS= read -r dmg_path; do
+            codesign --verify --verbose=2 "$dmg_path"
+          done < <(find dist -maxdepth 1 -name '*.dmg')
+
+          zip_path=$(find dist -maxdepth 1 -name '*.zip' | head -n 1 || true)
+          if [ -z "$zip_path" ]; then
+            echo "Expected a zip artifact in dist/"
+            exit 1
+          fi
+
+          ditto -x -k "$zip_path" "$verify_dir"
+          xcrun stapler validate -v "$verify_dir/$APP_NAME.app"
+          codesign --verify --deep --strict --verbose=2 "$verify_dir/$APP_NAME.app"
+          verify_app_update_config "$verify_dir/$APP_NAME.app/Contents/Resources/app-update.yml"
+
+          mount_base="$RUNNER_TEMP/verify-dmg-mounts"
+          rm -rf "$mount_base"
+          mkdir -p "$mount_base"
+
+          while IFS= read -r dmg_path; do
+            mount_dir="$mount_base/$(basename "$dmg_path" .dmg)"
+            mkdir -p "$mount_dir"
+
+            attach_plist="$RUNNER_TEMP/$(basename "$dmg_path").attach.plist"
+            hdiutil attach "$dmg_path" -mountpoint "$mount_dir" -nobrowse -readonly -plist > "$attach_plist"
+
+            mounted_app=$(find "$mount_dir" -maxdepth 2 -name '*.app' | head -n 1 || true)
+            if [ -z "$mounted_app" ]; then
+              echo "Expected a mounted app bundle inside $dmg_path"
+              hdiutil detach "$mount_dir" -quiet || true
+              exit 1
+            fi
+
+            xcrun stapler validate -v "$mounted_app"
+            codesign --verify --deep --strict --verbose=2 "$mounted_app"
+            verify_app_update_config "$mounted_app/Contents/Resources/app-update.yml"
+
+            hdiutil detach "$mount_dir" -quiet
+            rm -f "$attach_plist"
+          done < <(find dist -maxdepth 1 -name '*.dmg')
+        working-directory: packages/desktop-electron
+        timeout-minutes: 30
+        env:
+          OPENCODE_CHANNEL: ${{ inputs.channel || 'dev' }}
+
+      - name: Summarize submit phase
+        if: ${{ runner.os == 'macOS' && inputs.phase == 'submit' }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          ## Notarization Submitted
+
+          - Submission ID: `${{ steps.submit_notarization.outputs.submission_id }}`
+          - Source run ID: `${{ github.run_id }}`
+          - Source run attempt: `${{ github.run_attempt }}`
+          - Source ref: `${{ github.ref_name }}`
+          - Source sha: `${{ github.sha }}`
+          - Arch: `${{ matrix.arch_label }}`
+          - Workflow ref: `${{ needs.create-snapshot-tag.outputs.workflow_ref }}`
+          - Workflow sha: `${{ needs.create-snapshot-tag.outputs.workflow_sha }}`
+          - Artifact name: `pawwork-signed-app-${{ inputs.channel || 'dev' }}-${{ matrix.arch_label }}-${{ github.run_id }}-${{ github.run_attempt }}`
+
+          To finalize later, run:
+
+          `gh workflow run build.yml --repo ${{ github.repository }} --ref ${{ needs.create-snapshot-tag.outputs.workflow_ref }} -f phase=finalize -f channel=${{ inputs.channel || 'dev' }} -f arch=${{ matrix.arch_label }} -f source_run_id=${{ github.run_id }} -f source_run_attempt=${{ github.run_attempt }} -f source_ref=${{ github.ref_name }} -f source_sha=${{ github.sha }} -f source_workflow_ref=${{ needs.create-snapshot-tag.outputs.workflow_ref }} -f source_workflow_sha=${{ needs.create-snapshot-tag.outputs.workflow_sha }} -f submission_id=${{ steps.submit_notarization.outputs.submission_id }}`
+          EOF
+
+      - name: Package app
+        if: ${{ runner.os != 'macOS' && inputs.phase != 'finalize' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          publish_flag="never"
+          if [ "${{ inputs.phase || 'submit' }}" = "full" ]; then
+            publish_flag="always"
+          fi
+
+          pnpm exec electron-builder ${{ matrix.platform_flag }} --publish "$publish_flag" --config electron-builder.config.ts
+        working-directory: packages/desktop-electron
+        timeout-minutes: 60
+        env:
+          OPENCODE_CHANNEL: ${{ inputs.channel || 'dev' }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify and install Windows package
+        if: ${{ runner.os == 'Windows' && inputs.channel == 'prod' && inputs.phase != 'finalize' }}
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem -Path "dist/pawwork-win-x64-*.exe")
+          if ($installers.Count -ne 1) {
+            throw "Expected one Windows installer, found $($installers.Count)"
+          }
+          $installer = $installers[0].FullName
+
+          $installDir = Join-Path $env:RUNNER_TEMP "pawwork-installed"
+          Remove-Item -Path $installDir -Recurse -Force -ErrorAction SilentlyContinue
+          $install = Start-Process -FilePath $installer -ArgumentList "/S", "/D=$installDir" -Wait -PassThru
+          if ($install.ExitCode -ne 0) {
+            throw "NSIS installer exited with code $($install.ExitCode)"
+          }
+
+          $executable = Join-Path $installDir "PawWork.exe"
+          $updateConfig = Join-Path $installDir "resources/app-update.yml"
+          if (-not (Test-Path $executable)) { throw "Installed executable not found: $executable" }
+          if (-not (Test-Path $updateConfig)) { throw "Installed updater config not found: $updateConfig" }
+          if (-not (Select-String -Path $updateConfig -Pattern '^channel: latest-v2$' -Quiet)) {
+            throw "Installed updater config does not use latest-v2"
+          }
+          "PAWWORK_INSTALLED_DIR=$installDir" >> $env:GITHUB_ENV
+          "PAWWORK_INSTALLED_EXECUTABLE=$executable" >> $env:GITHUB_ENV
+        working-directory: packages/desktop-electron
+
+      - name: Smoke installed Windows package
+        if: ${{ runner.os == 'Windows' && inputs.channel == 'prod' && inputs.phase != 'finalize' }}
+        shell: pwsh
+        run: pnpm exec tsx ./scripts/ci-smoke.ts packaged prod "$env:PAWWORK_INSTALLED_EXECUTABLE"
+        working-directory: packages/desktop-electron
+        timeout-minutes: 5
+        env:
+          PAWWORK_CI_SMOKE_CDP: "true"
+
+      - name: Remove installed Windows package
+        if: ${{ always() && runner.os == 'Windows' && inputs.channel == 'prod' && inputs.phase != 'finalize' }}
+        shell: pwsh
+        run: |
+          if ($env:PAWWORK_INSTALLED_DIR) {
+            Remove-Item -Path "$env:PAWWORK_INSTALLED_DIR" -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Upload packaged app artifact
+        if: ${{ runner.os == 'Windows' && inputs.phase != 'finalize' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pawwork-${{ runner.os }}-${{ matrix.arch_label }}
+          if-no-files-found: error
+          path: |
+            packages/desktop-electron/dist/*.exe
+            packages/desktop-electron/dist/*.exe.blockmap
+            packages/desktop-electron/dist/latest*.yml
+
+      - name: Collect updater metadata
+        if: ${{ (runner.os == 'macOS' && (inputs.phase == 'finalize' || inputs.phase == 'full') && inputs.arch == matrix.arch_label) || (runner.os == 'Windows' && inputs.phase == 'full') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          metadata_dir="$RUNNER_TEMP/latest-yml/$METADATA_ARTIFACT"
+          mkdir -p "$metadata_dir"
+          cp "dist/$METADATA_FILE" "$metadata_dir/$METADATA_FILE"
+        working-directory: packages/desktop-electron
+
+      - name: Finalize updater metadata
+        if: ${{ inputs.channel != 'dev' && ((runner.os == 'macOS' && (inputs.phase == 'finalize' || inputs.phase == 'full') && inputs.arch == matrix.arch_label) || (runner.os == 'Windows' && inputs.phase == 'full')) }}
+        run: pnpm exec tsx ./scripts/finalize-latest-yml.ts
+        working-directory: packages/desktop-electron
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ env.PUBLISH_OWNER }}/${{ env.PUBLISH_REPO }}
+          EXISTING_LATEST_YML_DIR: ${{ runner.temp }}/existing-latest-yml
+          LATEST_YML_DIR: ${{ runner.temp }}/latest-yml
+          OPENCODE_VERSION: ${{ steps.package_version.outputs.version }}
+
+      # Runs at the tail of every prod finalize/full target, after its updater
+      # metadata lands in the draft. Publishes (and pins the tag to the build
+      # commit) only when ALL targets are present, then dispatches the R2 mirror;
+      # incomplete drafts are a no-op. The LAST target to finish flips the draft.
+      - name: Publish release when all targets are complete
+        if: ${{ inputs.channel == 'prod' && ((runner.os == 'macOS' && (inputs.phase == 'finalize' || inputs.phase == 'full') && inputs.arch == matrix.arch_label) || (runner.os == 'Windows' && inputs.phase == 'full')) }}
+        run: pnpm exec tsx ./scripts/publish-when-complete.ts
+        working-directory: packages/desktop-electron
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: v${{ steps.package_version.outputs.version }}
+          # The commit the assets were actually built from: finalize repackages
+          # the submit build checked out at source_sha (see the finalize checkout
+          # above); full/submit build the checked-out github.sha. Tie BUILD_SHA to
+          # the phase so a full run can never pass a source_sha that disagrees
+          # with what it actually built.
+          BUILD_SHA: ${{ inputs.phase == 'finalize' && inputs.source_sha || github.sha }}
+          # Identify this target so it can upload its own provenance marker.
+          RELEASE_OS: ${{ runner.os == 'macOS' && 'mac' || 'win' }}
+          RELEASE_ARCH: ${{ matrix.arch_label }}
+          MIRROR_REF: main
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: ${{ runner.os == 'macOS' && (inputs.phase == 'finalize' || inputs.phase == 'full') && inputs.arch == matrix.arch_label }}
+        with:
+          name: pawwork-${{ runner.os }}-${{ matrix.arch_label }}
+          path: |
+            packages/desktop-electron/dist/*.dmg
+            packages/desktop-electron/dist/*.zip
+            packages/desktop-electron/dist/*.exe
+
+  cleanup-snapshot-tag:
+    needs:
+      - build-electron
+    if: ${{ always() && inputs.phase == 'finalize' && needs.build-electron.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - run: |
+          set -euo pipefail
+
+          case "$SOURCE_WORKFLOW_REF" in
+            workflow-snapshot-*) ;;
+            *)
+              echo "Refusing to delete non-snapshot tag: $SOURCE_WORKFLOW_REF"
+              exit 1
+              ;;
+          esac
+
+          gh api \
+            --method DELETE \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${GITHUB_REPOSITORY}/git/refs/tags/${SOURCE_WORKFLOW_REF}"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          SOURCE_WORKFLOW_REF: ${{ inputs.source_workflow_ref }}

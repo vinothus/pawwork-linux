@@ -1,0 +1,32 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true,
+    "allowJs": true,
+    "resolveJsonModule": true,
+    "strict": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "emitDeclarationOnly": false,
+    "outDir": "node_modules/.ts-dist",
+    "types": [
+      "vite/client",
+      "node",
+      "electron"
+    ]
+  },
+  "include": [
+    "src",
+    "scripts",
+    "electron-builder.config.ts",
+    "electron.vite.config.ts",
+    "vitest.config.ts",
+    "*.test.ts",
+    "package.json"
+  ]
+}

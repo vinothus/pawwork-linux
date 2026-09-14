@@ -1,0 +1,190 @@
+# PawWork product defaults. Applied after the official web profile via --patch.
+# Later user settings still win. A patch replaces the targeted row's whole config.
+- id: agent-default-model
+  config:
+    provider: opencode
+    model: big-pickle
+# The zen gateway serves one wire protocol per model, and a pi-ai route carries
+# one protocol for every model on it, so OpenCode Free arrives as two routes.
+# Both name their protocol and endpoint here rather than deferring to the
+# bundled catalog: the catalog does not describe every free id (it has no
+# `ling-3.0-flash-fin-free`, and only the paid `muse-spark-1.2`), so a route
+# without them cannot serve those models before the first refresh lands.
+# resources/dsh/product/lib/opencode-free.cjs keeps both lists current.
+#
+# The gateway requires a per-conversation id on every request, and only the
+# Completions protocol gates that behind `sendSessionAffinityHeaders`. The switch
+# is route-level because a catalog refresh rewrites `models` and would drop it.
+- id: llm-pi-ai
+  config:
+    providers:
+      opencode:
+        apiKeyEnv: OPENCODE_API_KEY
+        displayName: OpenCode Free
+        api: openai-completions
+        baseURL: https://opencode.ai/zen/v1
+        compat:
+          sendSessionAffinityHeaders: true
+        models:
+          - id: big-pickle
+          - id: ling-3.0-flash-fin-free
+          - id: mimo-v2.5-free
+          - id: nemotron-3-ultra-free
+          - id: nemotron-3.5-lightning-free
+      opencode-responses:
+        apiKeyEnv: OPENCODE_API_KEY
+        displayName: OpenCode Free (Responses)
+        api: openai-responses
+        baseURL: https://opencode.ai/zen/v1
+        models:
+          - id: muse-spark-1.2-contributor-free
+- id: llm-deepseek
+  disabled: true
+# Silences the `dsh web:` URL line; `pawwork-web-ready` below reports the same
+# URL to the Electron main process over IPC instead. See
+# resources/dsh/product/lib/web-ready.js for why that line is not an interface.
+#
+# A patch replaces the whole config, so the three keys PawWork does not choose
+# are restated verbatim from the `web-runtime` row in dsh-web-app's own patch.
+- id: web-runtime
+  config:
+    openBrowser: !!js ctx.webStartup.openBrowser
+    printUrl: false
+    surfaceContext: true
+    trustedHosts: !!js ctx.webStartup.trustedHosts
+# Every provider dsh-base mounts needs a vendor key, and PawWork ships OpenCode
+# Free as its default model, so most installs hold none and the first search
+# fails. The PawWork provider answers with Exa's shared anonymous allowance when
+# no key is held, so search works before anyone configures anything.
+#
+# It has to be one provider rather than one per vendor, because the seam looks
+# its provider up per search but takes the id from static entry config here,
+# with no settings namespace or change event behind it. Anything named here is
+# the only backend the product could ever reach, so the choice between engines
+# lives inside the provider — and in the settings card the plugin ships — rather
+# than in this file.
+- id: web
+  config:
+    searchProvider: pawwork
+    fetchProvider: http
+# The PawWork provider constructs this same DeepSeek backend when the user
+# selects it, and resolves the same `DEEPSEEK_API_KEY` reference the Models page
+# writes — so this row is not a capability, it is a second settings card titled
+# "web search" that edits a provider the seam will never select.
+- id: web-search-deepseek
+  disabled: true
+# Temporary Windows escape hatch for the native picker's out-of-process COM
+# worker: a worker crash is reported only as "exited before reporting a result"
+# and makes the normal workspace-selection path unusable. DSH documents direct
+# composition of the browse host/client pair as the supported way to pin this
+# interaction. Remove this override once PawWork upgrades to a DSH release whose
+# native Windows picker is fixed and verified on Windows 10.
+- id: directory-picker
+  disabled: !!js process.platform === 'win32'
+# `dsh-web-app` disables the dsh-base `tool-web` outright because the agent
+# presets each mount their own, so re-enabling it here puts `web_fetch` in the
+# global tool layer, which every agent inherits regardless of preset — including
+# `minimal`, which mounts no `tool-web` and so had no web tool at all before.
+# `search` stays off because each preset's own scoped `tool-web` registers
+# `web_search` and shadows this row for that name; a second registration would
+# be dead weight that also drops the preset's 60s search timeout.
+#
+# `dsh-web-fetch-http` (mounted by dsh-base since 0.1.2-alpha.2, so this file
+# only flips the tool on) does defend the destination: it validates one DNS
+# answer set, rejects non-public addresses including NAT64-translated ones,
+# hands that pinned address to the transport so the name cannot resolve again to
+# a private one, refuses credentials in the URL, and does not follow
+# cross-origin redirects. dsh-base still ships `fetch: false`, which is a
+# deployment default rather than a warning about the provider.
+#
+# What none of that addresses is the direction the risk actually runs. Page text
+# the model reads is attacker-controlled, and the next fetch URL is the model's
+# to choose, so context can leave in a query string to a perfectly public host.
+# Validating the address cannot see that.
+#
+# PawWork accepts it rather than mitigating it here, because `bash` already
+# egresses unprompted inside an `(allow default)` sandbox — its approval gate
+# covers only `sandbox_permissions` escalation — so this adds convenience, not a
+# channel. The mitigation belongs in `tools/pre-execute`, which no web tool
+# registers: gate a `web_fetch` whose URL did not come from that turn's own
+# `web_search` results.
+- id: tool-web
+  disabled: false
+  config:
+    search: false
+    fetch: true
+# dsh-base indexes into `:memory:` and never opens it, so the sidebar can only
+# match session titles and workspace names. A durable file is what makes
+# searching what was said possible; `first-search` keeps a user who never
+# searches from opening the database at all.
+#
+# The backfill lands on that first search either way — `openAt` governs only
+# when the file is opened, not when the index is built — and it is all-or-
+# nothing: every session is read and parsed before a single row is written, and
+# the read phase aborts on the sidebar's own signal, which fires on every
+# keystroke past a 250ms debounce. So editing the query mid-flight starts the
+# whole backfill over. It does finish once the typing stops, but on a large
+# history that is seconds of a blocked synchronous SQLite handle. Reconciliation
+# also re-reads its snapshot afterwards, and a session appended to mid-scan
+# changes its revision, so searching while an agent runs can fail outright.
+#
+# The FTS5 table is not contentless, so message text — tool-call arguments and
+# tool results included — lives in this file at rest, where before it lived only
+# in the session log. Same directory, same 0600. What is new is that deleting a
+# session does not clear it: rows go only during the next search's
+# reconciliation, and with no `secure_delete` and no `VACUUM` the freed pages
+# keep the text recoverable.
+- id: session-query-sqlite
+  config:
+    path: !!js dshHomePath('session-query.sqlite')
+    openAt: first-search
+# The market must wait for PawWork's generation-scoped Desktop services. Their
+# presence selects its managed package runtime and makes self-restart unavailable.
+- id: dsh-market
+  inject:
+    - desktopProfiles
+    - desktopPnpm
+- insert:
+    - id: directory-picker-browse-host
+      name: '@deepseek-ai/dsh-host-directory-picker-browse'
+      disabled: !!js process.platform !== 'win32'
+    - id: directory-picker-browse-client
+      name: '@deepseek-ai/dsh-client-ui-directory-picker-browse'
+      disabled: !!js process.platform !== 'win32'
+    - id: pawwork-identity
+      name: '@pawwork/dsh-identity'
+    - id: pawwork-product
+      name: '@pawwork/dsh-product'
+    # Its own row rather than a line inside pawwork-product: readiness needs
+    # only `connection` and `webServer`, and an entry that also carries the
+    # catalog refresher, the Desktop services and the market routes is an entry
+    # any of those can keep from ever reporting — or, once its fiber dies with a
+    # report still pending, take the whole runtime down with.
+    - id: pawwork-web-ready
+      name: '@pawwork/dsh-product/web-ready'
+    - id: import-v1
+      # Since 0.1.2-alpha.2 a relative entry name resolves against the directory
+      # of the patch file that states it — this file's own — where it used to
+      # resolve against the active profile directory. The two are the same path
+      # today only because this patch sits at the DSH home root.
+      name: './plugins/import-v1/index.mjs'
+    - id: pawwork-automations
+      name: '@pawwork/dsh-automations'
+    - id: pawwork-web-search
+      name: '@pawwork/dsh-web-search'
+    # The in-app update UI: settings section, ready toast, sidebar indicator.
+    # Pure presentation over the preload's pawworkUpdater bridge; the updater
+    # state machine stays in the Electron main process.
+    - id: pawwork-updater
+      name: '@pawwork/dsh-updater'
+    # Not in the default composition upstream; without it the model has no clock.
+    # The interval is a floor between injections, not a refresh timer — upstream
+    # has no default, so dropping it makes every step carry its own reading.
+    # It is also the noise knob for the session search above: each injection is
+    # a real `user/message` event, and the indexer keys on event type alone, so
+    # every reading becomes a searchable document matching `time`, `turn`,
+    # `elapsed` and the zone name. Filtering by `source.kind` is upstream's to do.
+    - id: time-context
+      name: '@deepseek-ai/dsh-time-context'
+      config:
+        refreshIntervalMs: 60000

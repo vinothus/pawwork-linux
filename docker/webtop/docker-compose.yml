@@ -1,0 +1,37 @@
+# PawWork Linux test rig — a webtop desktop with PawWork built from source and
+# auto-launched on it, all reachable from a browser at http://localhost:3000.
+#
+#   docker compose -f docker/webtop/docker-compose.yml up -d --build
+#   podman compose -f docker/webtop/docker-compose.yml up -d --build   (or podman-compose)
+#
+# Then open http://localhost:3000 and log in with CUSTOM_USER / PASSWORD.
+
+services:
+  webtop:
+    build:
+      context: ../..
+      dockerfile: docker/webtop/Dockerfile
+    image: pawwork-linux-test
+    container_name: pawwork-linux
+    restart: unless-stopped
+    security_opt:
+      - label=disable        # SELinux label handling (podman/docker on Fedora etc.)
+    ports:
+      - "3000:3000"          # webtop web UI (HTTP)
+      - "3001:3001"          # webtop web UI (HTTPS)
+    environment:
+      TZ: Asia/Kolkata
+      CUSTOM_USER: vinoth    # webtop login (HTTP basic auth)
+      PASSWORD: Vindec@2026
+      PUID: "1000"           # in-container user; files on /config are owned by this uid
+      PGID: "1000"
+      # PAWWORK_RUN_MODE: "built"   # built (default) | dev (pnpm dev:desktop, HMR)
+      # PAWWORK_DIR: "/app/pawwork"
+    shm_size: "4g"           # Chromium/Electron needs shared memory
+    volumes:
+      - webtop-config:/config   # persistent home of the abc user (app data here)
+      - webtop-data:/data       # extra data volume
+
+volumes:
+  webtop-config:
+  webtop-data:

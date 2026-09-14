@@ -1,0 +1,56 @@
+name: deploy-site
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/deploy-site.yml"
+      - "package.json"
+      - "site/**"
+
+  # Build-check the site on PRs that touch it; deploy step is skipped (see below)
+  pull_request:
+    paths:
+      - ".github/workflows/deploy-site.yml"
+      - "package.json"
+      - "site/**"
+
+  # Allow manual trigger for first deploy or re-deploy without code change
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-site-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+
+      - name: Enable pnpm
+        run: corepack enable
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm --filter @pawwork/site build
+
+      # Deploy only when on main (push to main or manual dispatch from main). PRs and
+      # manual runs from other branches stop after the build-check steps above, so
+      # the fixed --branch=main below can never publish non-main content.
+      - name: Deploy site
+        if: github.ref == 'refs/heads/main'
+        run: pnpm exec wrangler pages deploy site/dist --project-name=pawwork --branch=main
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

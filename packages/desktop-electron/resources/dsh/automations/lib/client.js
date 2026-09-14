@@ -1,0 +1,722 @@
+window.__ModuleLoader__.load({
+  id: "@pawwork/dsh-automations",
+  factory: (require) => {
+    const { createElement, useEffect, useRef, useState } = require("react")
+    const {
+      Button,
+      Input,
+      Modal,
+      Pill,
+      StateDot,
+      useAnchoredPosition,
+      useDismissOnOutsidePointer,
+      IconChevronLeftOutline14,
+      IconChevronRightOutline14,
+      IconChevronDownOutline14,
+      IconCheckOutline16,
+      IconPauseOutline16,
+      IconPlayOutline16,
+      IconSearchOutline16,
+      IconTrashOutline16,
+    } = require("@deepseek-ai/dsh-client-ui-primitives")
+    const h = createElement
+
+    const automationCss = `
+.pawwork-automations-surface {
+  color: var(--dsw-alias-label-primary); display: flex; flex-direction: column;
+  gap: 12px; min-width: 0; width: 100%;
+}
+/* One page head per settings page: the panel header above already carries the shell's actions and
+   Close, so a second action cluster 8px below them competes for the same corner. */
+.pawwork-automations-page-head {
+  display: flex; flex-direction: column; gap: 2px; padding: 2px 0 14px;
+}
+.pawwork-automations-page-head h2 { font-size: 18px; font-weight: 600; line-height: 26px; margin: 0; }
+.pawwork-automations-page-head p { color: var(--dsw-alias-label-tertiary); font: var(--dsw-font-xs-13); margin: 0; }
+.pawwork-automations-toolbar { align-items: center; display: flex; gap: 10px; }
+.pawwork-automations-search { box-sizing: border-box; flex: 1; min-width: 0; }
+.pawwork-automations-tabs { display: flex; flex: none; gap: 6px; }
+.pawwork-automations-list { display: flex; flex-direction: column; gap: 8px; }
+.pawwork-automation-row {
+  align-items: center; background: transparent; border: 1px solid var(--dsw-alias-border-l2); border-radius: 12px;
+  color: inherit; display: grid; font: inherit; gap: 12px;
+  grid-template-columns: 16px minmax(0, 1fr) auto; min-height: 56px;
+  padding: 10px 14px; text-align: left; width: 100%;
+}
+.pawwork-automation-row:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.pawwork-automation-row:focus-visible { outline: 2px solid var(--dsw-alias-state-business-primary); outline-offset: 1px; }
+.pawwork-automation-row-icon { color: var(--dsw-alias-label-secondary); display: inline-flex; }
+.pawwork-automation-row-title, .pawwork-automation-row-meta {
+  display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pawwork-automation-row-title { font-size: 14px; font-weight: 500; line-height: 22px; }
+.pawwork-automation-row-meta, .pawwork-automation-row-trail {
+  color: var(--dsw-alias-label-tertiary); font-size: 12px; line-height: 18px;
+}
+.pawwork-automation-row-trail { white-space: nowrap; }
+.pawwork-automations-empty, .pawwork-automations-loading {
+  border: 1px dashed var(--dsw-alias-border-l3); border-radius: 8px;
+  color: var(--dsw-alias-label-tertiary); font-size: 13px; line-height: 20px; padding: 20px; text-align: center;
+}
+.pawwork-automations-error { color: var(--dsw-alias-state-error-primary); font-size: 12px; line-height: 18px; margin: 12px 0; }
+.pawwork-automation-panel { min-width: 0; width: 100%; }
+.pawwork-automation-panel-inner { display: flex; flex-direction: column; gap: 12px; width: 100%; }
+.pawwork-automation-back { align-self: flex-start; margin-left: -8px; }
+.pawwork-automation-panel-head {
+  align-items: flex-start; display: flex; flex-wrap: wrap; gap: 12px 16px; justify-content: space-between;
+}
+.pawwork-automation-panel-head > div:first-child { flex: 1 1 240px; min-width: 0; }
+.pawwork-automation-panel-head h2 { font-size: 16px; font-weight: 500; line-height: 24px; margin: 0; }
+.pawwork-automation-panel-head h2 { overflow-wrap: anywhere; }
+.pawwork-automation-panel-summary { color: var(--dsw-alias-label-tertiary); font-size: 12px; line-height: 18px; margin: 2px 0 0; overflow-wrap: anywhere; }
+.pawwork-automation-actions { align-items: center; display: flex; flex: none; gap: 6px; }
+.pawwork-automation-delete-confirm { color: var(--dsw-alias-state-error-primary); }
+.pawwork-automation-form {
+  background: var(--dsw-alias-bg-module-platform); border-radius: 12px;
+  display: flex; flex-direction: column; gap: 14px; padding: 14px 16px;
+}
+.pawwork-automation-group {
+  display: flex; flex-direction: column; gap: 6px; min-width: 0;
+}
+.pawwork-automation-group-label { color: var(--dsw-alias-label-secondary); font-size: 12px; font-weight: 500; line-height: 18px; }
+.pawwork-automation-group-hint { color: var(--dsw-alias-label-tertiary); font-size: 12px; line-height: 18px; }
+/* One control box for the whole editor, copied from DSH's own settings editor (ui-settings-models):
+   a border-box 32px field on bg-layer-1. The Input primitive is an inline-flex *content* box that
+   adds its own padding and border, so sizing it to a column made every field spill 18px over its
+   neighbour; it stays where it belongs, on the toolbar search that needs its icon slot. */
+.pawwork-automation-input, .pawwork-automation-select {
+  background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px;
+  box-sizing: border-box; color: var(--dsw-alias-label-primary); font: inherit; font-size: 14px;
+  height: 32px; line-height: 22px; padding: 0 10px; width: 100%;
+}
+.pawwork-automation-input:focus, .pawwork-automation-select:focus { border-color: var(--dsw-alias-brand-primary); outline: none; }
+.pawwork-automation-input::placeholder { color: var(--dsw-alias-label-dimmed); }
+/* Date and time fields otherwise carry the browser's own picker button, which is neither themed nor
+   placed by us; the date field opens the calendar below instead. */
+.pawwork-automation-input::-webkit-calendar-picker-indicator { display: none; }
+.pawwork-automation-select {
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none'%3E%3Cpath d='M3 4.5L6 7.5L9 4.5' stroke='%2381858C' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-position: right 12px center; background-repeat: no-repeat; background-size: 12px 12px;
+  padding-right: 32px; text-align: left;
+}
+/* Values the editor shows but cannot change still occupy a field's line box, so a label beside them
+   does not sit 6px higher than the one next to a real field. */
+.pawwork-automation-readonly {
+  align-items: center; color: var(--dsw-alias-label-tertiary); display: flex; font-size: 14px;
+  line-height: 22px; min-height: 32px; overflow-wrap: anywhere;
+}
+.pawwork-automation-textarea {
+  background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px; box-sizing: border-box; color: var(--dsw-alias-label-primary); font: inherit;
+  font-size: 14px; line-height: 22px; min-height: 116px; padding: 9px 10px; resize: vertical; width: 100%;
+}
+.pawwork-automation-textarea:focus { border-color: var(--dsw-alias-brand-primary); outline: none; }
+.pawwork-automation-textarea::placeholder { color: var(--dsw-alias-label-dimmed); }
+/* DSH has no date control to reuse, so this is the one PawWork original in the editor. It overlays
+   the form the way a picker should: fixed to the field's rect, which also escapes the settings
+   panel's scroller, and it tracks that rect while the panel scrolls. */
+.pawwork-automation-calendar {
+  background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l2); border-radius: 12px;
+  box-shadow: var(--dsw-shadow-lv2); box-sizing: border-box; display: flex; flex-direction: column;
+  gap: 4px; padding: 8px; position: fixed; width: 260px; z-index: 1100;
+}
+.pawwork-automation-calendar-head { align-items: center; display: flex; gap: 4px; justify-content: space-between; }
+.pawwork-automation-calendar-title { font-size: 13px; font-weight: 500; line-height: 20px; }
+.pawwork-automation-calendar-nav {
+  align-items: center; background: transparent; border: none; border-radius: 6px; color: var(--dsw-alias-label-secondary);
+  display: inline-flex; flex: none; height: 24px; justify-content: center; padding: 0; width: 24px;
+}
+.pawwork-automation-calendar-nav:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.pawwork-automation-calendar-grid { display: grid; gap: 2px; grid-template-columns: repeat(7, 1fr); }
+.pawwork-automation-calendar-weekday {
+  color: var(--dsw-alias-label-tertiary); font-size: 11px; line-height: 20px; text-align: center;
+}
+.pawwork-automation-day {
+  background: transparent; border: none; border-radius: 8px; color: var(--dsw-alias-label-primary);
+  font: inherit; font-size: 12px; height: 28px; line-height: 28px; padding: 0;
+}
+.pawwork-automation-day:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.pawwork-automation-day-today { color: var(--dsw-alias-brand-text); font-weight: 600; }
+.pawwork-automation-day-selected, .pawwork-automation-day-selected:hover {
+  background: var(--dsw-alias-button-primary-fill); color: var(--dsw-alias-label-primary-foreground); font-weight: 500;
+}
+.pawwork-automation-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+.pawwork-automation-advanced { border-top: 1px solid var(--dsw-alias-border-l2); padding-top: 10px; }
+.pawwork-automation-advanced-summary {
+  align-items: center; background: transparent; border: none; border-radius: 6px; color: var(--dsw-alias-label-secondary);
+  display: flex; font: inherit; font-size: 12px; font-weight: 500; gap: 6px; line-height: 18px;
+  margin-left: -4px; padding: 2px 4px; width: fit-content;
+}
+.pawwork-automation-advanced-summary:hover { color: var(--dsw-alias-label-primary); }
+/* One column: every advanced field is label, control, then a line of explanation, and fields of
+   unequal height side by side in a grid read as misaligned. */
+.pawwork-automation-advanced-content { display: flex; flex-direction: column; gap: 14px; padding-top: 12px; }
+.pawwork-automation-form-footer {
+  align-items: center; display: flex; gap: 8px; justify-content: flex-end;
+}
+.pawwork-automation-discard { color: var(--dsw-alias-label-secondary); font-size: 12px; margin-right: auto; }
+.pawwork-automation-history {
+  border-top: 1px solid var(--dsw-alias-border-l2); margin-top: 4px; padding-top: 14px;
+}
+.pawwork-automation-history h3 { font-size: 14px; font-weight: 500; line-height: 22px; margin: 0 0 8px; }
+.pawwork-automation-run { align-items: center; display: flex; gap: 10px; justify-content: space-between; min-height: 44px; padding: 4px 0; }
+.pawwork-automation-run-main { flex: 1; min-width: 0; }
+.pawwork-automation-run > button { flex: 0 0 auto; white-space: nowrap; }
+.pawwork-automation-run-state { font-size: 12px; font-weight: 500; margin-left: 8px; }
+.pawwork-automation-run-time, .pawwork-automation-run-summary { color: var(--dsw-alias-label-tertiary); font-size: 12px; }
+.pawwork-automation-run-time { margin-left: 8px; }
+.pawwork-automation-run-summary {
+  display: block; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pawwork-automation-run-note { color: var(--dsw-alias-state-warn-label); display: block; font-size: 12px; line-height: 18px; margin-top: 2px; overflow-wrap: anywhere; }
+`
+
+    const styleId = "@pawwork/dsh-automations"
+    if (document.querySelector(`style[data-plugin-css="${styleId}"]`) === null) {
+      const style = document.createElement("style")
+      style.dataset.plugin = "@pawwork/dsh-automations"
+      style.dataset.pluginCss = styleId
+      style.textContent = automationCss
+      document.head.appendChild(style)
+    }
+    function isChinese() { return document.documentElement.lang.startsWith("zh") }
+    function text(chinese, english) { return isChinese() ? chinese : english }
+
+    // Editor order: the week starts on Monday in the select, and Sunday is cron 0.
+    const WEEKDAYS = [["1", "周一", "Monday"], ["2", "周二", "Tuesday"], ["3", "周三", "Wednesday"], ["4", "周四", "Thursday"], ["5", "周五", "Friday"], ["6", "周六", "Saturday"], ["0", "周日", "Sunday"]]
+
+    // One statement of which cron expressions the editor's presets round-trip.
+    // The list label read it, the editor form read it, and the save path wrote
+    // it, each with its own copy — and they had drifted: the form recognised a
+    // weekly expression it had written itself while the label showed raw cron.
+    function cronPreset(expression) {
+      const [minute, hour, day, month, weekday] = String(expression).split(/\s+/)
+      if (!/^\d+$/.test(hour) || !/^\d+$/.test(minute) || day !== "*" || month !== "*") return null
+      const time = `${hour.padStart(2, "0")}:${minute.padStart(2, "0")}`
+      if (weekday === "*") return { frequency: "daily", time }
+      if (weekday === "1-5") return { frequency: "weekdays", time }
+      if (WEEKDAYS.some(([value]) => value === weekday)) return { frequency: "weekly", time, weekday }
+      return null
+    }
+
+    function presetCron({ frequency, time, weekday }) {
+      const [hour, minute] = String(time).split(":").map(Number)
+      if (!Number.isInteger(hour) || !Number.isInteger(minute)) return null
+      return `${minute} ${hour} * * ${frequency === "daily" ? "*" : frequency === "weekdays" ? "1-5" : weekday}`
+    }
+
+    function automationCall(connection, endpoint, payload = {}, signal) {
+      return connection.rpc.call("/pawwork-automations", endpoint, payload, signal).then((result) => {
+        if (!result.ok) {
+          const failure = new Error(result.error.message)
+          failure.issues = result.error.details?.issues
+          throw failure
+        }
+        return result.value
+      })
+    }
+
+    // The store owns cron validity, so the editor localizes the codes it can explain and falls back
+    // to the store's own sentence for the rest.
+    function errorText(error) {
+      if (error?.issues?.some((issue) => issue?.code === "invalid-cron")) {
+        return text("Cron 表达式无效，或它指定的时间永远不会到来", "This cron expression is invalid, or the time it names never comes")
+      }
+      return typeof error?.message === "string" ? error.message : String(error)
+    }
+
+    function workspaceName(cwd) {
+      const parts = String(cwd).split(/[\\/]/).filter(Boolean)
+      return parts.at(-1) || cwd
+    }
+    function formatTime(value) {
+      if (value === null || value === undefined) return "—"
+      return new Intl.DateTimeFormat(isChinese() ? "zh-CN" : "en", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value))
+    }
+    function formatSchedule(definition) {
+      if (definition.kind === "oneshot") return text(`单次 ${formatTime(definition.fireAt)}`, `Once ${formatTime(definition.fireAt)}`)
+      if (definition.rhythm.kind === "interval") {
+        const minutes = definition.rhythm.everyMs / 60_000
+        if (Number.isInteger(minutes / 60)) return text(`每 ${minutes / 60} 小时`, `Every ${minutes / 60}h`)
+        return text(`每 ${minutes} 分钟`, `Every ${minutes}m`)
+      }
+      const preset = cronPreset(definition.rhythm.expression)
+      if (preset?.frequency === "daily") return text(`每天 ${preset.time}`, `Daily ${preset.time}`)
+      if (preset?.frequency === "weekdays") return text(`工作日 ${preset.time}`, `Weekdays ${preset.time}`)
+      if (preset?.frequency === "weekly") {
+        const [, chinese, english] = WEEKDAYS.find(([value]) => value === preset.weekday)
+        return text(`每${chinese} ${preset.time}`, `${english}s ${preset.time}`)
+      }
+      return `Cron ${definition.rhythm.expression}`
+    }
+    // One statement of what a schedule is doing; the row's glyph and trailing text both render it.
+    function definitionState(definition) {
+      if (definition.paused) return { icon: IconPauseOutline16, label: text("已暂停", "Paused") }
+      if (definition.terminalReason === "completed") return { icon: IconCheckOutline16, label: text("已完成", "Completed") }
+      if (definition.terminalReason === "missed") return { icon: IconCheckOutline16, label: text("已错过", "Missed") }
+      if (definition.terminalReason === "run-limit") return { icon: IconCheckOutline16, label: text("已跑满", "Run limit reached") }
+      return { icon: IconPlayOutline16, label: `${text("下次", "Next")} ${formatTime(definition.nextFireAt)}` }
+    }
+
+    function runState(run) {
+      const labels = isChinese()
+        ? { failed: "失败", running: "运行中", stopped: "已停止", succeeded: "已完成" }
+        : { failed: "Failed", running: "Running", stopped: "Stopped", succeeded: "Completed" }
+      return labels[run.state] || run.state
+    }
+    function runDotState(run) {
+      if (run.state === "failed") return "error"
+      if (run.state === "running") return "ongoing"
+      if (run.state === "stopped") return "warning"
+      return "done"
+    }
+
+    function modelLabel(selection) {
+      return `${selection.provider}/${selection.model}`
+    }
+    function RunRow({ onError, run, sessions, closeSettings }) {
+      const summary = run.error || run.stopReason || run.result
+      const fallback = run.modelFallback
+        ? text(`模型 ${modelLabel(run.modelFallback.requested)} 不可用，本次运行使用 ${modelLabel(run.modelFallback.used)}`, `Model ${modelLabel(run.modelFallback.requested)} is unavailable; this run uses ${modelLabel(run.modelFallback.used)}`)
+        : null
+      async function openSession() {
+        try {
+          await sessions.refresh()
+          sessions.open(run.sessionId)
+          closeSettings()
+        } catch (error) {
+          onError(error instanceof Error ? error.message : String(error))
+        }
+      }
+      return h("div", { className: "pawwork-automation-run" },
+        h("div", { className: "pawwork-automation-run-main" },
+          h(StateDot, { size: 10, state: runDotState(run) }),
+          h("span", { className: "pawwork-automation-run-state" }, runState(run)),
+          h("span", { className: "pawwork-automation-run-time" }, formatTime(run.triggeredAt)),
+          fallback ? h("span", { className: "pawwork-automation-run-note" }, fallback) : null,
+          summary ? h("span", { className: "pawwork-automation-run-summary" }, summary) : null),
+        run.sessionId ? h(Button, { onClick: openSession, size: "sm", variant: "outline" }, text("打开会话", "Open session")) : null)
+    }
+
+    function localDateTime(value) {
+      const date = new Date(value)
+      const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000)
+      return local.toISOString().slice(0, 16)
+    }
+    function scheduleForm(definition) {
+      const base = { time: "09:00", weekday: "1", intervalMinutes: "60", cron: "0 9 * * *", at: localDateTime(Date.now() + 3_600_000) }
+      if (definition.kind === "oneshot") return { ...base, frequency: "once", at: localDateTime(definition.fireAt) }
+      if (definition.rhythm.kind === "interval") return { ...base, frequency: "interval", intervalMinutes: String(definition.rhythm.everyMs / 60_000) }
+      const preset = cronPreset(definition.rhythm.expression)
+      if (preset) return { ...base, ...preset, cron: definition.rhythm.expression }
+      return { ...base, frequency: "cron", cron: definition.rhythm.expression }
+    }
+    function formState(definition) {
+      return {
+        ...scheduleForm(definition), title: definition.title, prompt: definition.prompt,
+        provider: definition.model.provider, model: definition.model.model, timezone: definition.timezone,
+        runCount: definition.stop?.kind === "count" ? String(definition.stop.count) : "",
+      }
+    }
+    function stopPayload(runCount) {
+      const trimmed = String(runCount).trim()
+      if (!trimmed) return { kind: "never" }
+      const count = Number(trimmed)
+      // "0" is truthy as a string, so an empty check let it through and the user
+      // met the backend's untranslated "run_count must be a positive integer".
+      if (!Number.isSafeInteger(count) || count < 1) throw new Error(text("运行次数至少为 1", "Run count must be at least 1"))
+      return { kind: "count", count }
+    }
+
+    function schedulePayload(form) {
+      if (form.frequency === "once") {
+        if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(form.at)) throw new Error(text("请选择运行日期和时间", "Choose a run date and time"))
+        const fireAt = new Date(form.at).getTime()
+        if (!Number.isFinite(fireAt) || fireAt <= Date.now()) throw new Error(text("运行时间必须在未来", "Run time must be in the future"))
+        return { kind: "oneshot", fireAt }
+      }
+      if (form.frequency === "interval") {
+        const everyMs = Number(form.intervalMinutes) * 60_000
+        // Mirrors MIN_INTERVAL_MS in automations.cjs. The renderer cannot require
+        // the backend module, so a test pins the two together; without this the
+        // user would meet the backend's untranslated error instead.
+        if (!Number.isSafeInteger(everyMs) || everyMs < 30_000) throw new Error(text("间隔至少为 30 秒", "Interval must be at least 30 seconds"))
+        return { kind: "recurring", rhythm: { kind: "interval", everyMs } }
+      }
+      let expression = form.cron
+      if (["daily", "weekdays", "weekly"].includes(form.frequency)) {
+        expression = presetCron(form)
+        if (!expression) throw new Error(text("请选择运行时间", "Choose a run time"))
+      }
+      return { kind: "recurring", rhythm: { kind: "cron", expression } }
+    }
+    function Field({ label, children, hint = null }) {
+      return h("div", { className: "pawwork-automation-group" },
+        h("span", { className: "pawwork-automation-group-label" }, label),
+        children,
+        hint ? h("span", { className: "pawwork-automation-group-hint" }, hint) : null)
+    }
+    // DSH's own settings editor (ui-settings-models) styles a native select as one of its fields
+    // rather than anchoring a Menu to a button: the popup is then the platform's, correctly placed
+    // and keyboard-driven, and the field keeps the exact box of the inputs beside it.
+    function SelectControl({ label, onChange, options, value }) {
+      return h("select", {
+        "aria-label": label, className: "pawwork-automation-select",
+        onChange: (event) => onChange(event.target.value), value,
+      }, options.map(([id, optionLabel]) => h("option", { key: id, value: id }, optionLabel)))
+    }
+
+    const WEEKDAY_INITIALS = { zh: ["日", "一", "二", "三", "四", "五", "六"], en: ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"] }
+    // The panel is measured before it is placed, so it renders once with nothing to place it by.
+    const PLACEMENT_PENDING = { left: 0, top: 0, visibility: "hidden" }
+    function isoDate(year, month, day) {
+      return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`
+    }
+    function monthTitle(year, month) {
+      return new Intl.DateTimeFormat(isChinese() ? "zh-CN" : "en", { month: "long", year: "numeric" }).format(new Date(year, month - 1, 1))
+    }
+    function formatDate(value) {
+      const [year, month, day] = String(value).split("-").map(Number)
+      if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) return value
+      return new Intl.DateTimeFormat(isChinese() ? "zh-CN" : "en", { dateStyle: "medium" }).format(new Date(year, month - 1, day))
+    }
+    // The browser's own date picker is an OS panel the app can neither theme nor place, and DSH
+    // exports no date control, so the calendar itself is the editor's one original. Where it opens
+    // is not: DSH already anchors its own popovers, and this uses that rather than a second copy of
+    // the same measuring, clamping and scroll tracking.
+    function DateField({ label, onChange, value }) {
+      const anchor = useRef(null)
+      const panel = useRef(null)
+      const [open, setOpen] = useState(false)
+      const [view, setView] = useState(String(value).slice(0, 7))
+      const [year, month] = view.split("-").map(Number)
+      const today = isoDate(new Date().getFullYear(), new Date().getMonth() + 1, new Date().getDate())
+      const dayCount = new Date(Date.UTC(year, month, 0)).getUTCDate()
+      const lead = new Date(Date.UTC(year, month - 1, 1)).getUTCDay()
+      const placement = useAnchoredPosition({ anchorRef: anchor, gap: 4, margin: 12, open, panelRef: panel })
+      useDismissOnOutsidePointer(anchor, open, setOpen)
+      useEffect(() => {
+        if (!open) return undefined
+        // Escape closes the calendar, not the Settings panel behind it. Tabbing out closes it too, so
+        // the capture-phase handler is only installed while the focus is actually inside the calendar.
+        const cancel = (event) => { if (event.key === "Escape") { event.stopPropagation(); setOpen(false) } }
+        const leave = (event) => { if (!anchor.current?.contains(event.relatedTarget)) setOpen(false) }
+        document.addEventListener("keydown", cancel, true)
+        anchor.current?.addEventListener("focusout", leave)
+        const node = anchor.current
+        return () => {
+          document.removeEventListener("keydown", cancel, true)
+          node?.removeEventListener("focusout", leave)
+        }
+      }, [open])
+      // Arrow keys need somewhere to start, and the panel is invisible until it has been placed.
+      const placed = open && placement !== null
+      useEffect(() => {
+        if (!placed) return
+        const grid = panel.current
+        ;(grid?.querySelector(".pawwork-automation-day-selected") ?? grid?.querySelector(".pawwork-automation-day"))?.focus()
+      }, [placed])
+      function moveFocus(event) {
+        const step = { ArrowDown: 7, ArrowLeft: -1, ArrowRight: 1, ArrowUp: -7 }[event.key]
+        if (step === undefined) return
+        event.preventDefault()
+        const days = Array.from(panel.current?.querySelectorAll(".pawwork-automation-day") ?? [])
+        const next = days.indexOf(document.activeElement) + step
+        days[Math.min(Math.max(next, 0), days.length - 1)]?.focus()
+      }
+      function toggle() {
+        setView(String(value).slice(0, 7))
+        setOpen((current) => !current)
+      }
+      function shift(delta) {
+        const shifted = new Date(Date.UTC(year, month - 1 + delta, 1))
+        setView(`${shifted.getUTCFullYear()}-${String(shifted.getUTCMonth() + 1).padStart(2, "0")}`)
+      }
+      const cells = []
+      for (let index = 0; index < lead; index += 1) cells.push(h("span", { key: `lead-${index}` }))
+      for (let day = 1; day <= dayCount; day += 1) {
+        const date = isoDate(year, month, day)
+        cells.push(h("button", {
+          "aria-current": date === today ? "date" : undefined, "aria-label": formatDate(date), "aria-pressed": date === value,
+          className: `pawwork-automation-day${date === value ? " pawwork-automation-day-selected" : date === today ? " pawwork-automation-day-today" : ""}`,
+          key: date, onClick: () => { onChange(date); setOpen(false) }, type: "button",
+        }, String(day)))
+      }
+      return h("div", { ref: anchor },
+        h("button", {
+          "aria-expanded": open, "aria-haspopup": "dialog", "aria-label": `${label}: ${formatDate(value)}`,
+          className: "pawwork-automation-select", onClick: toggle, type: "button",
+        }, formatDate(value)),
+        open ? h("div", { "aria-label": label, className: "pawwork-automation-calendar", ref: panel, role: "dialog", style: placement ?? PLACEMENT_PENDING },
+          h("div", { className: "pawwork-automation-calendar-head" },
+            h("button", { "aria-label": text("上个月", "Previous month"), className: "pawwork-automation-calendar-nav", onClick: () => shift(-1), type: "button" }, h(IconChevronLeftOutline14, { size: 14 })),
+            h("span", { className: "pawwork-automation-calendar-title" }, monthTitle(year, month)),
+            h("button", { "aria-label": text("下个月", "Next month"), className: "pawwork-automation-calendar-nav", onClick: () => shift(1), type: "button" }, h(IconChevronRightOutline14, { size: 14 }))),
+          h("div", { className: "pawwork-automation-calendar-grid", onKeyDown: moveFocus },
+            WEEKDAY_INITIALS[isChinese() ? "zh" : "en"].map((initial) => h("span", { className: "pawwork-automation-calendar-weekday", key: initial }, initial)),
+            cells)) : null)
+    }
+
+    // The definition's pair is always an option, so the form opens on what it says. Its label
+    // states the catalog fact and the run rule that follows from it: with no provider routable
+    // nothing is judged, a provider whose list could not be read keeps its pair, and any other
+    // unlisted pair is moved to the default model.
+    function ModelSelect({ catalog, onChange, pinned, value }) {
+      const key = (selection) => JSON.stringify([selection.provider, selection.model])
+      const groups = catalog?.groups || []
+      const listed = (selection) => groups.some((group) => group.id === selection.provider && group.models.some((model) => model.id === selection.model))
+      const unlisted = (selection) => catalog === null ? text("正在加载模型…", "Loading models…")
+        : catalog.error ? text("模型列表加载失败", "Model list failed to load")
+        : catalog.routableProviders.length === 0 ? text("当前没有可用模型", "No model is available right now")
+        : catalog.failures.some((failure) => failure.id === selection.provider) ? text("暂时无法列出，运行时仍使用", "Cannot be listed right now; runs still use it")
+        : text("未列出，运行时改用默认模型", "Unlisted; runs use the default model")
+      const extra = [pinned, ...(key(value) === key(pinned) ? [] : [value])].filter((selection) => !listed(selection))
+      return h("select", {
+        "aria-label": text("模型", "Model"), className: "pawwork-automation-select",
+        onChange: (event) => onChange(JSON.parse(event.target.value)), value: key(value),
+      },
+        extra.map((selection) => h("option", { key: key(selection), value: key(selection) }, `${modelLabel(selection)} (${unlisted(selection)})`)),
+        groups.map((group) => h("optgroup", { key: group.id, label: group.name },
+          group.models.map((model) => h("option", { key: key({ provider: group.id, model: model.id }), value: key({ provider: group.id, model: model.id }) }, model.name)))))
+    }
+
+    function AutomationEditor({ catalog, closeSettings, connection, definition, onClose, onDeleted, onSaved, sessions }) {
+      const baseline = useRef(formState(definition))
+      const [form, setForm] = useState(baseline.current)
+      const [busy, setBusy] = useState("")
+      const [error, setError] = useState("")
+      const [discarding, setDiscarding] = useState(false)
+      const [deleting, setDeleting] = useState(false)
+      const [advanced, setAdvanced] = useState(false)
+      const dirty = JSON.stringify(form) !== JSON.stringify(baseline.current)
+      const update = (field) => (event) => setForm((current) => ({ ...current, [field]: event.target.value }))
+      const choose = (field) => (value) => setForm((current) => ({ ...current, [field]: value }))
+
+      async function save(event) {
+        event.preventDefault()
+        setBusy("save")
+        setError("")
+        try {
+          if (!form.title.trim() || !form.prompt.trim() || !form.provider.trim() || !form.model.trim()) {
+            throw new Error(text("请填写标题、任务内容和模型", "Complete title, prompt, and model"))
+          }
+          const schedule = schedulePayload(form)
+          const common = {
+            title: form.title, prompt: form.prompt,
+            model: { provider: form.provider, model: form.model }, timezone: form.timezone,
+            ...(schedule.kind === "recurring" ? { stop: stopPayload(form.runCount) } : {}),
+          }
+          const result = await automationCall(connection, "update", { id: definition.id, expectedRevision: definition.revision, ...common, ...(schedule.kind === "oneshot" ? { fireAt: schedule.fireAt } : { rhythm: schedule.rhythm }) })
+          onSaved(result)
+        } catch (saveError) {
+          setError(errorText(saveError))
+        } finally { setBusy("") }
+      }
+      function requestClose() {
+        if (!dirty) return onClose()
+        setDiscarding(true)
+      }
+      async function mutate(endpoint, payload) {
+        setBusy(endpoint)
+        setError("")
+        try {
+          const result = await automationCall(connection, endpoint, payload)
+          onSaved(endpoint === "run-now" ? definition : result)
+        }
+        catch (mutationError) { setError(errorText(mutationError)) }
+        finally { setBusy("") }
+      }
+      async function remove() {
+        setBusy("delete")
+        try { await automationCall(connection, "delete", { id: definition.id }); onDeleted() }
+        catch (deleteError) {
+          setDeleting(false)
+          setError(errorText(deleteError))
+        }
+        finally { setBusy("") }
+      }
+
+      const scheduleOptions = definition.kind === "oneshot"
+        ? [["once", text("单次", "Once")]]
+        : [["daily", text("每天", "Daily")], ["weekdays", text("工作日", "Weekdays")], ["weekly", text("每周", "Weekly")], ["interval", text("固定间隔", "Interval")], ["cron", "Cron"]]
+      const weekdayOptions = WEEKDAYS.map(([value, chinese, english]) => [value, text(chinese, english)])
+      return h("section", { className: "pawwork-automation-panel" }, h("div", { className: "pawwork-automation-panel-inner" },
+        h(Button, { className: "pawwork-automation-back", icon: h(IconChevronLeftOutline14, { size: 14 }), onClick: requestClose, size: "sm", type: "button", variant: "ghost" }, text("返回自动化", "Back to Automations")),
+        h("div", { className: "pawwork-automation-panel-head" },
+          h("div", null,
+            h("h2", null, definition.title),
+            h("p", { className: "pawwork-automation-panel-summary" }, `${formatSchedule(definition)}  ${workspaceName(definition.cwd)}`)),
+          h("div", { className: "pawwork-automation-actions" },
+            h(Button, { disabled: busy !== "" || dirty, icon: h(definition.paused ? IconPlayOutline16 : IconPauseOutline16, { size: 16 }), onClick: () => mutate("set-paused", { id: definition.id, paused: !definition.paused }), size: "sm", title: dirty ? text("请先保存更改", "Save changes first") : undefined, variant: "outline" }, definition.paused ? text("启用", "Resume") : text("暂停", "Pause")),
+            h(Button, { disabled: busy !== "" || dirty, icon: h(IconPlayOutline16, { size: 16 }), onClick: () => mutate("run-now", { id: definition.id }), size: "sm", title: dirty ? text("请先保存更改", "Save changes first") : undefined, variant: "primary" }, text("立即运行", "Run now")),
+            h(Button, { "aria-label": text("删除", "Delete"), disabled: busy !== "", icon: h(IconTrashOutline16, { size: 16 }), onClick: () => setDeleting(true), size: "sm", title: text("删除", "Delete"), type: "button", variant: "ghost" }))),
+        h("form", { className: "pawwork-automation-form", onSubmit: save },
+          h(Field, { label: text("标题", "Title") }, h("input", { "aria-label": text("标题", "Title"), className: "pawwork-automation-input", onChange: update("title"), value: form.title })),
+          h(Field, { label: text("任务内容", "Instructions") }, h("textarea", { "aria-label": text("任务内容", "Instructions"), className: "pawwork-automation-textarea", onChange: update("prompt"), value: form.prompt })),
+          h(Field, { label: text("工作区", "Workspace") }, h("span", { className: "pawwork-automation-readonly", title: definition.cwd }, workspaceName(definition.cwd))),
+          h("div", { className: "pawwork-automation-grid" },
+            h(Field, { label: text("重复", "Repeat") }, h(SelectControl, { label: text("重复", "Repeat"), onChange: choose("frequency"), options: scheduleOptions, value: form.frequency })),
+            form.frequency === "once" ? h(Field, { label: text("运行日期", "Run date") }, h(DateField, { label: text("运行日期", "Run date"), onChange: (date) => setForm((current) => ({ ...current, at: `${date}T${current.at.slice(11, 16)}` })), value: form.at.slice(0, 10) })) : null,
+            form.frequency === "once" ? h(Field, { label: text("运行时间", "Run time") }, h("input", { "aria-label": text("运行时间", "Run time"), className: "pawwork-automation-input", onChange: (event) => setForm((current) => ({ ...current, at: `${current.at.slice(0, 10)}T${event.target.value}` })), type: "time", value: form.at.slice(11, 16) })) : null,
+            ["daily", "weekdays", "weekly"].includes(form.frequency) ? h(Field, { label: text("时间", "Time") }, h("input", { "aria-label": text("时间", "Time"), className: "pawwork-automation-input", onChange: update("time"), type: "time", value: form.time })) : null,
+            form.frequency === "weekly" ? h(Field, { label: text("星期", "Weekday") }, h(SelectControl, { label: text("星期", "Weekday"), onChange: choose("weekday"), options: weekdayOptions, value: form.weekday })) : null,
+            form.frequency === "interval" ? h(Field, { label: text("间隔分钟", "Interval minutes") }, h("input", { "aria-label": text("间隔分钟", "Interval minutes"), className: "pawwork-automation-input", min: "0.5", onChange: update("intervalMinutes"), step: "0.5", type: "number", value: form.intervalMinutes })) : null,
+            form.frequency === "cron" ? h(Field, { label: "Cron" }, h("input", { "aria-label": "Cron", className: "pawwork-automation-input", onChange: update("cron"), value: form.cron })) : null),
+          h("div", { className: "pawwork-automation-advanced" },
+            // Not the DisclosureRow primitive: it is a list row, and its icon column pushes the
+            // title out of the label column the fields below it line up on. This is the summary row
+            // DSH's own settings editor collapses its optional half behind.
+            h("button", {
+              "aria-controls": "pawwork-automation-advanced-content", "aria-expanded": advanced,
+              className: "pawwork-automation-advanced-summary",
+              onClick: () => setAdvanced((current) => !current), type: "button",
+            }, h(advanced ? IconChevronDownOutline14 : IconChevronRightOutline14, { size: 14 }), text("高级设置", "Advanced settings")),
+            advanced ? h("div", { className: "pawwork-automation-advanced-content", id: "pawwork-automation-advanced-content" },
+              h(Field, { hint: text("每次运行使用的模型。不在列表里的模型，运行时会改用默认模型。", "The model each run uses. A model not in the list is replaced by the default model at run time."), label: text("模型", "Model") }, h(ModelSelect, { catalog, onChange: ([provider, model]) => setForm((current) => ({ ...current, provider, model })), pinned: definition.model, value: { provider: form.provider, model: form.model } })),
+              h(Field, { hint: text("上面的时间按这个时区计算，默认是本机时区。", "The schedule above is read in this time zone. Defaults to this computer's."), label: text("时区", "Timezone") }, h("input", { "aria-label": text("时区", "Timezone"), className: "pawwork-automation-input", onChange: update("timezone"), value: form.timezone })),
+              form.frequency !== "once" ? h(Field, { hint: text("完成这么多次后自动停止，留空则一直运行。", "Stops after this many completed runs. Leave empty to keep running."), label: text("运行次数上限", "Run limit") }, h("input", { "aria-label": text("运行次数上限", "Run limit"), className: "pawwork-automation-input", min: "1", onChange: update("runCount"), placeholder: text("永不停止", "Never"), type: "number", value: form.runCount })) : null,
+              h(Field, { label: text("会话", "Session") }, h("span", { className: "pawwork-automation-readonly" }, definition.context === "continue" ? text("继续原会话", "Continue original session") : text("每次新会话", "New session each run")))) : null),
+          error ? h("div", { className: "pawwork-automations-error", role: "alert" }, error) : null,
+          h("div", { className: "pawwork-automation-form-footer" },
+            discarding ? h("span", { className: "pawwork-automation-discard" }, text("放弃未保存的更改？", "Discard unsaved changes?")) : null,
+            discarding ? h(Button, { onClick: () => setDiscarding(false), size: "sm", type: "button", variant: "outline" }, text("继续编辑", "Keep editing")) : null,
+            discarding ? h(Button, { onClick: onClose, size: "sm", type: "button", variant: "outline" }, text("放弃", "Discard")) : null,
+            !discarding ? h(Button, { disabled: busy !== "" || !dirty, size: "sm", type: "submit", variant: "primary" }, text("保存", "Save")) : null)),
+        h("div", { className: "pawwork-automation-history" },
+          h("h3", null, text("最近运行", "Recent runs")),
+          [definition.activeRun, ...(definition.recentRuns || [])].filter(Boolean).length
+            ? [definition.activeRun, ...(definition.recentRuns || [])].filter(Boolean).map((run) => h(RunRow, { closeSettings, key: run.id, onError: setError, run, sessions }))
+            : h("div", { className: "pawwork-automations-empty" }, text("还没有运行记录", "No run history yet")))),
+        h(Modal, {
+          closeLabel: text("关闭", "Close"),
+          description: text("此操作无法撤销。既有运行记录会保留。", "This cannot be undone. Existing run history is retained."),
+          footer: h("div", { className: "pawwork-automation-actions" },
+            h(Button, { autoFocus: true, disabled: busy === "delete", onClick: () => setDeleting(false), size: "sm", variant: "outline" }, text("取消", "Cancel")),
+            h(Button, { className: "pawwork-automation-delete-confirm", disabled: busy === "delete", onClick: remove, size: "sm", variant: "outline" }, busy === "delete" ? text("正在删除…", "Deleting…") : text("删除", "Delete"))),
+          onClose: () => { if (busy !== "delete") setDeleting(false) },
+          open: deleting,
+          title: text("删除自动化？", "Delete automation?"),
+        }))
+    }
+
+    function AutomationSurface({ close, connection, createViaChat, remote, sessions, useWorkspaces }) {
+      const workspaceState = useWorkspaces((state) => state)
+      const workspaces = workspaceState.items || []
+      const [data, setData] = useState(null)
+      const [selectedId, setSelectedId] = useState(null)
+      const [query, setQuery] = useState("")
+      const [filter, setFilter] = useState("all")
+      const [error, setError] = useState("")
+      // Loaded when an editor opens, not with the list: the catalog resolves every model of every
+      // provider. A failed or empty result is not a value; the next editor open asks again.
+      const [catalog, setCatalog] = useState(null)
+      const editing = selectedId !== null
+      useEffect(() => {
+        if (!editing || (catalog !== null && !catalog.error && catalog.groups.length > 0)) return
+        let live = true
+        remote.session.modelCatalog().then((response) => {
+          if (!response.ok) throw response.error
+          if (live) setCatalog(response.value)
+        }).catch((catalogError) => {
+          if (live) setCatalog({ groups: [], routableProviders: [], failures: [], error: errorText(catalogError) })
+        })
+        return () => { live = false }
+      }, [editing])
+
+      async function load(signal) {
+        setError("")
+        try {
+          const list = await automationCall(connection, "list", {}, signal)
+          setData(list)
+          setSelectedId((current) => list.definitions.some((item) => item.id === current) ? current : null)
+        } catch (loadError) {
+          if (!signal?.aborted) setError(errorText(loadError))
+        }
+      }
+      useEffect(() => {
+        const abort = new AbortController()
+        let timer = null
+        async function poll() {
+          await load(abort.signal)
+          if (!abort.signal.aborted) timer = setTimeout(() => void poll(), 1_000)
+        }
+        void poll()
+        return () => {
+          abort.abort()
+          if (timer !== null) clearTimeout(timer)
+        }
+      }, [])
+
+      const definitions = data?.definitions || []
+      const selected = definitions.find((definition) => definition.id === selectedId) || null
+      const visible = definitions.filter((definition) => {
+        // Active means it still has a next run: neither paused nor finished.
+        if (filter === "active" && (definition.paused || definition.terminalReason)) return false
+        if (filter === "paused" && !definition.paused) return false
+        if (filter === "ended" && (definition.paused || !definition.terminalReason)) return false
+        const needle = query.trim().toLocaleLowerCase()
+        return !needle || definition.title.toLocaleLowerCase().includes(needle) || workspaceName(definition.cwd).toLocaleLowerCase().includes(needle)
+      })
+      const preferredWorkspace = workspaces.find((item) => item.workspaceId === workspaceState.recentWorkspaceId) || workspaces[0]
+      function closePanel() { setSelectedId(null) }
+      async function reloadAfter(result) { await load(); setSelectedId(result.id) }
+      async function createAutomation() {
+        if (!preferredWorkspace) return
+        setError("")
+        try { await createViaChat(preferredWorkspace.workspaceId) }
+        catch (createError) { setError(errorText(createError)) }
+      }
+
+      if (selected) return h("main", { className: "pawwork-automations-surface" },
+        h(AutomationEditor, { catalog, closeSettings: close, connection, definition: selected, key: `${selected.id}:${selected.revision}`, onClose: closePanel, onDeleted: async () => { closePanel(); await load() }, onSaved: reloadAfter, sessions }))
+
+      return h("main", { className: "pawwork-automations-surface" },
+          h("div", { className: "pawwork-automations-page-head" },
+            h("h2", null, text("自动化", "Automations")),
+            h("p", null, text("让 PawWork 按计划处理重复工作，创建过程在对话里完成。", "Let PawWork handle recurring work on a schedule; you create one in chat."))),
+          h("div", { className: "pawwork-automations-toolbar" },
+            h(Input, { "aria-label": text("搜索自动化", "Search automations"), className: "pawwork-automations-search", icon: h(IconSearchOutline16, { size: 16 }), onChange: (event) => setQuery(event.target.value), placeholder: text("搜索自动化", "Search automations"), value: query }),
+            h("div", { className: "pawwork-automations-tabs", role: "tablist" }, [["all", text("全部", "All")], ["active", text("启用", "Active")], ["paused", text("暂停", "Paused")], ["ended", text("已结束", "Ended")]].map(([value, label]) => h(Pill, { active: filter === value, key: value, onClick: () => setFilter(value), role: "tab" }, label))),
+            h(Button, { className: "pawwork-automations-create", disabled: !preferredWorkspace, onClick: createAutomation, size: "sm", variant: "primary" }, text("新建自动化", "New automation"))),
+          error ? h("div", { className: "pawwork-automations-error", role: "alert" }, error) : null,
+          data === null ? h("div", { className: "pawwork-automations-loading" }, text("正在加载…", "Loading…")) : null,
+          h("div", { className: "pawwork-automations-list" },
+            visible.map((definition) => {
+              const state = definitionState(definition)
+              return h("button", { className: "pawwork-automation-row", key: definition.id, onClick: () => setSelectedId(definition.id), type: "button" },
+                h("span", { className: "pawwork-automation-row-icon" }, h(state.icon, { size: 16 })),
+                h("span", null, h("span", { className: "pawwork-automation-row-title" }, definition.title), h("span", { className: "pawwork-automation-row-meta" }, formatSchedule(definition))),
+                h("span", { className: "pawwork-automation-row-trail" }, state.label))
+            }),
+            visible.length === 0 && data !== null ? h("div", { className: "pawwork-automations-empty" }, query ? text("没有匹配的自动化", "No matching automations") : text("还没有自动化。在对话中描述任务和运行时间即可创建。", "No automations yet. Describe a task and schedule in chat to create one.")) : null))
+    }
+
+    const inject = ["slots", "connection", "conversation", "remote", "remote.session", "sessions", "uiWorkspace"]
+
+    function apply(ctx) {
+      ctx.slots.inject("settings.section", () => ctx.slots.register({
+        name: "settings.section", id: "pawwork-automations", order: 40,
+        label: () => text("自动化", "Automations"),
+      }, (props) => h(AutomationSurface, {
+          ...props, connection: ctx.connection, remote: ctx.remote,
+          createViaChat: async (workspaceId) => {
+            // Navigation moved off the Workspace Controller in DSH 0.1.2-alpha.2:
+            // `workspaces` is the pure Host projection now, and connecting one to
+            // a session — reusing its blank session or creating one — belongs to
+            // `uiWorkspace`. The workspace list this surface renders arrives as a
+            // slot prop, so nothing here reaches the projection any more.
+            const sessionId = await ctx.uiWorkspace.connectWorkspace(workspaceId)
+            const binding = ctx.sessions.binding(sessionId)
+            if (!binding) throw new Error("automation chat session is unavailable")
+            ctx.conversation.input.for(binding.ctx).setDraft(text("帮我创建一个自动化。先问我它要做什么、什么时候运行，再帮我创建。", "Help me create an automation. Ask what it should do and when it should run, then create it."))
+            ctx.sessions.open(sessionId)
+            props.close()
+          },
+          sessions: ctx.sessions,
+        })))
+    }
+
+    return { inject, apply }
+  },
+})

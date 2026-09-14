@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "pawwork",
+  "description": "Desktop AI workstation for knowledge workers",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.23.0",
+  "scripts": {
+    "dev": "pnpm run dev:desktop",
+    "dev:desktop": "pnpm --filter @pawwork/desktop dev",
+    "typecheck": "pnpm --filter @pawwork/desktop typecheck",
+    "lint": "eslint \"packages/desktop-electron/{src,scripts}/**/*.ts\" \"packages/desktop-electron/*.ts\" \"packages/desktop-electron/resources/**/*.{js,mjs,cjs}\"",
+    "lint:ci": "pnpm run lint",
+    "test": "pnpm --filter @pawwork/desktop test && node --test .github/scripts/label-policy-check.test.js"
+  },
+  "devDependencies": {
+    "eslint": "^9.39.4",
+    "typescript-eslint": "8.59.3",
+    "wrangler": "4.124.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Astro-Han/pawwork"
+  },
+  "license": "Apache-2.0"
+}

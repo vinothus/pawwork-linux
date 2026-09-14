@@ -1,0 +1,38 @@
+diff --git a/lib/index.js b/lib/index.js
+index e06cf8d5faf9755710420623908478c704b225b8..079169ccc5b783b6d4a12a69fcf89bbc60fd0889 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -400,7 +400,12 @@ const COMPLETIONS_COMPAT_GATE = {
+ 	vercelGatewayRouting: "withhold",
+ 	zaiToolStream: "withhold",
+ 	supportsOpenAIGrammarTools: "withhold",
+-	sendSessionAffinityHeaders: "withhold",
++	/* PawWork patch: let a route ask for the session-affinity headers, which
++	Completions gates off and Responses sends unconditionally. The decision stays
++	in the product patch. The switch also writes `session_id` and
++	`x-session-affinity`; narrowing it to one header would mean opening
++	`sessionAffinityFormat` too. Drop this once upstream offers the field. */
++	sendSessionAffinityHeaders: "offer",
+ 	deferredToolsMode: "withhold",
+ 	sessionAffinityFormat: "withhold"
+ };
+@@ -2564,7 +2569,18 @@ function directoryEntries(profiles) {
+ 			...error === void 0 ? {} : { error }
+ 		});
+ 	};
+-	for (const provider of catalog) declare(provider, provider);
++	/* PawWork patch: restore the 0.1.0-rc.8 directory filter. A catalog provider
++	whose only auth branch is OAuth (today: openai-codex) has nothing this adapter
++	can authenticate with — the harness resolves API keys through ctx.credentials
++	and hands them to pi-ai per request, while an OAuth grant only ever comes from
++	a sign-in flow. rc.1 dropped this filter for the new ctx.authorization seam,
++	and 0.1.5-rc.1 registers a flow per provider through it, but no DSH release
++	yet ships a surface that can start one: dsh-web-app does not mount
++	dsh-authorization and the models settings UI has no sign-in control, so
++	listing such a provider offers an API-key form whose key can never work. Drop
++	this patch once DSH ships that surface and PawWork mounts
++	@deepseek-ai/dsh-authorization. */
++	for (const provider of catalog) if (catalogProvider(provider)?.auth?.apiKey !== void 0) declare(provider, provider);
+ 	for (const [provider, profile] of profiles) declare(provider, profile.displayName, profile.catalogError);
+ 	return [...entries.values()];
+ }

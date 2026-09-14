@@ -1,0 +1,229 @@
+import { beforeEach, describe, expect, test, vi } from "vitest"
+
+// createMainWindow is pure wiring: it decides nothing itself, it attaches the
+// decisions made in window-navigation and window-chrome to the right Electron
+// events. Nothing covered that wiring, so the subframe navigation guard and the
+// per-navigation reset of the inserted stylesheet could both be deleted with
+// every suite green.
+
+type Listener = (...args: unknown[]) => unknown
+
+const webContents = vi.hoisted(() => ({
+  listeners: new Map<string, Listener[]>(),
+  inserted: [] as string[],
+  removed: [] as string[],
+  nextKey: 0,
+  windowOpenHandler: undefined as ((details: { url: string }) => unknown) | undefined,
+  on(event: string, listener: Listener) {
+    const existing = webContents.listeners.get(event) ?? []
+    webContents.listeners.set(event, [...existing, listener])
+  },
+  emit(event: string, ...args: unknown[]) {
+    for (const listener of webContents.listeners.get(event) ?? []) listener(...args)
+  },
+  setWindowOpenHandler(handler: (details: { url: string }) => unknown) {
+    webContents.windowOpenHandler = handler
+  },
+  async insertCSS(css: string) {
+    webContents.inserted.push(css)
+    webContents.nextKey += 1
+    return `key-${webContents.nextKey}`
+  },
+  async removeInsertedCSS(key: string) {
+    webContents.removed.push(key)
+  },
+  setZoomFactor: () => {},
+  url: "",
+  getURL: () => webContents.url,
+  reload: () => {},
+}))
+
+const win = vi.hoisted(() => ({
+  webContents,
+  listeners: new Map<string, Listener[]>(),
+  fullscreen: false,
+  on(event: string, listener: Listener) {
+    const existing = win.listeners.get(event) ?? []
+    win.listeners.set(event, [...existing, listener])
+  },
+  once: () => {},
+  emit(event: string) {
+    for (const listener of win.listeners.get(event) ?? []) listener()
+  },
+  isFullScreen: () => win.fullscreen,
+  setTitle: () => {},
+  setTitleBarOverlay: vi.fn(() => {}),
+  setBackgroundColor: vi.fn(() => {}),
+  show: () => {},
+  created: [] as Record<string, unknown>[],
+  loaded: [] as string[],
+  async loadURL(url: string) {
+    win.loaded.push(url)
+  },
+}))
+
+const openExternal = vi.hoisted(() => vi.fn(async () => {}))
+
+vi.mock("electron", () => ({
+  app: { isPackaged: false, dock: undefined },
+  BrowserWindow: class {
+    constructor(options: Record<string, unknown>) {
+      win.created.push(options)
+    }
+    webContents = webContents
+    on = win.on
+    once = win.once
+    isFullScreen = win.isFullScreen
+    setTitle = win.setTitle
+    setTitleBarOverlay = win.setTitleBarOverlay
+    setBackgroundColor = win.setBackgroundColor
+    show = win.show
+    loadURL = win.loadURL
+  },
+  nativeImage: { createFromPath: () => ({ isEmpty: () => true }) },
+  nativeTheme: { shouldUseDarkColors: false },
+  shell: { openExternal },
+}))
+vi.mock("electron-log/main.js", () => ({ default: { error: () => {} } }))
+vi.mock("electron-window-state", () => ({
+  default: () => ({ x: 0, y: 0, width: 1280, height: 800, manage: () => {} }),
+}))
+
+const { applyWindowColorScheme, createMainWindow, startupUrl } = await import("./windows")
+
+const DSH = "http://127.0.0.1:4321/"
+
+function openWindow(dshUrl?: string, colorScheme: "light" | "dark" = "light") {
+  webContents.url = dshUrl ?? startupUrl(colorScheme)
+  return createMainWindow({
+    preload: "/preload.cjs",
+    colorScheme,
+    dshUrl: () => dshUrl,
+  })
+}
+
+beforeEach(() => {
+  webContents.listeners.clear()
+  win.listeners.clear()
+  webContents.inserted.length = 0
+  webContents.removed.length = 0
+  webContents.nextKey = 0
+  win.fullscreen = false
+  webContents.url = ""
+  win.loaded.length = 0
+  win.created.length = 0
+  win.setTitleBarOverlay.mockClear()
+  win.setBackgroundColor.mockClear()
+  openExternal.mockClear()
+})
+
+function navigate(url: string, isMainFrame: boolean) {
+  const event = { isMainFrame, url, preventDefault: vi.fn(() => {}) }
+  webContents.emit("will-frame-navigate", event)
+  return event
+}
+
+describe("main window wiring", () => {
+  // Whatever has not been painted by the web app yet is one of these surfaces,
+  // so a scheme that reaches only some of them is the white edge users report.
+  test("repaints the window background and the Windows caption overlay together", () => {
+    applyWindowColorScheme(win, "win32", "dark")
+
+    expect(win.setBackgroundColor).toHaveBeenCalledWith("#151517")
+    expect(win.setTitleBarOverlay).toHaveBeenCalledWith({
+      height: 32,
+      color: "#151517",
+      symbolColor: "#f0f0f0",
+    })
+    // The overlay is a Windows control; elsewhere only the background exists.
+    applyWindowColorScheme(win, "darwin", "light")
+    expect(win.setBackgroundColor).toHaveBeenLastCalledWith("#fff")
+    expect(win.setTitleBarOverlay).toHaveBeenCalledTimes(1)
+  })
+
+  // The window is restored at the size of the last run, so its first frame is a
+  // full window of whatever this colour is.
+  test("creates the window on the scheme it will be shown in", () => {
+    openWindow(undefined, "dark")
+
+    expect(win.created[0]).toMatchObject({ backgroundColor: "#151517", show: false })
+    expect(decodeURIComponent(win.loaded[0]!)).toContain("color-scheme:dark")
+  })
+
+  // Chromium paints its own canvas white until a declared scheme says otherwise,
+  // and the page's dark background has to be the one DSH is about to paint.
+  test("declares the startup page's scheme and matches the web app's surface", () => {
+    expect(decodeURIComponent(startupUrl("dark"))).toContain(":root{color-scheme:dark;--bg:#151517;")
+    expect(decodeURIComponent(startupUrl("light"))).toContain(":root{color-scheme:light;--bg:#fff;")
+  })
+
+  test("holds a subframe to the DSH origin", () => {
+    openWindow(DSH)
+
+    expect(navigate("http://127.0.0.1:4321/settings", false).preventDefault).not.toHaveBeenCalled()
+    // A subframe that leaves the origin is stopped where it is: unlike the main
+    // frame, it is not handed to the browser either.
+    expect(navigate("https://example.com/phish", false).preventDefault).toHaveBeenCalled()
+    expect(openExternal).not.toHaveBeenCalled()
+  })
+
+  test("sends a main-frame navigation off the origin to the browser instead", () => {
+    openWindow(DSH)
+
+    expect(navigate("https://example.com/docs", true).preventDefault).toHaveBeenCalled()
+    expect(openExternal).toHaveBeenCalledWith("https://example.com/docs")
+  })
+
+  test("never opens a second window: same-origin loads here, everything else in the browser", () => {
+    openWindow(DSH)
+    win.loaded.length = 0
+
+    expect(webContents.windowOpenHandler!({ url: "http://127.0.0.1:4321/settings" })).toEqual({ action: "deny" })
+    expect(win.loaded).toEqual(["http://127.0.0.1:4321/settings"])
+
+    expect(webContents.windowOpenHandler!({ url: "https://example.com/docs" })).toEqual({ action: "deny" })
+    expect(openExternal).toHaveBeenCalledWith("https://example.com/docs")
+    expect(win.loaded).toEqual(["http://127.0.0.1:4321/settings"])
+  })
+
+  // The window is created before DSH has an origin and has to show something in
+  // the meantime; loading nothing is what the 30-second blank start used to be.
+  test("opens on the local startup page until DSH has a URL", () => {
+    openWindow()
+    expect(win.loaded).toEqual([startupUrl("light")])
+
+    win.loaded.length = 0
+    openWindow(DSH)
+    expect(win.loaded).toEqual([DSH])
+  })
+
+  // A wait in front of DSH is only distinguishable from a hang if the page names
+  // it: DSH itself prints nothing until it is ready.
+  test("names the step being waited on when the startup page is given a notice", () => {
+    const page = decodeURIComponent(startupUrl("dark", "Updating the community plugin market…"))
+
+    expect(page).toContain("<p class=\"notice\">Updating the community plugin market…</p>")
+    expect(page).toContain("aria-label=\"Updating the community plugin market…\"")
+    expect(decodeURIComponent(startupUrl("dark"))).not.toContain("class=\"notice\"")
+  })
+
+  // The notice lands in an attribute value as well as in text, so quotes have
+  // to be escaped or a notice could close the attribute and add its own.
+  test("escapes a notice into both the attribute and the text", () => {
+    const page = decodeURIComponent(startupUrl("dark", '"><img src=x onerror=alert(1)>'))
+
+    expect(page).toContain("aria-label=\"&quot;&gt;&lt;img src=x onerror=alert(1)&gt;\"")
+    expect(page).not.toContain("<img")
+  })
+
+  // With no origin to belong to, nothing belongs to it — including the page DSH
+  // was showing a moment before it died.
+  test("denies every DSH-origin navigation once the runtime is gone", () => {
+    openWindow()
+    webContents.url = startupUrl("light")
+
+    expect(navigate("http://127.0.0.1:4321/settings", true).preventDefault).toHaveBeenCalled()
+    expect(navigate("http://127.0.0.1:4321/settings", false).preventDefault).toHaveBeenCalled()
+    expect(openExternal).not.toHaveBeenCalled()
+  })
+})

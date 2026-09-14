@@ -1,0 +1,89 @@
+---
+// Page shell: head SEO/meta tags plus the anti-flash theme script.
+// Language is fixed per static route: the `lang` prop sets html lang,
+// canonical, hreflang, and og:locale. There is no client-side swap.
+import "../styles/global.css";
+import type { Lang } from "../i18n";
+
+interface Props {
+  title: string;
+  description: string;
+  lang?: Lang;
+  image?: string;
+}
+
+const { title, description, lang = "en", image = "/og-image.png" } = Astro.props;
+const htmlLang = lang === "cn" ? "zh-CN" : "en";
+const canonical = new URL(Astro.url.pathname, Astro.site).href;
+const ogImage = new URL(image, Astro.site).href;
+const enUrl = new URL("/", Astro.site).href;
+const cnUrl = new URL("/zh-CN/", Astro.site).href;
+---
+
+<!doctype html>
+<html lang={htmlLang} data-theme="light" data-lang={lang}>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" type="image/svg+xml" href="/app-icon.svg" />
+    <link rel="canonical" href={canonical} />
+    <link rel="alternate" hreflang="en" href={enUrl} />
+    <link rel="alternate" hreflang="zh-CN" href={cnUrl} />
+    <link rel="alternate" hreflang="x-default" href={enUrl} />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <meta name="theme-color" content="#ff5910" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="PawWork" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:locale" content={lang === "cn" ? "zh_CN" : "en_US"} />
+    <meta property="og:locale:alternate" content={lang === "cn" ? "en_US" : "zh_CN"} />
+    <meta property="og:image" content={ogImage} />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={title} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={ogImage} />
+    <meta name="twitter:image:alt" content="PawWork — open-source desktop AI agent" />
+
+    <link rel="alternate" type="text/markdown" href="/llms.txt" />
+
+    <script is:inline type="application/ld+json" set:html={JSON.stringify({
+      "@context": "https://schema.org",
+      "@type": "SoftwareApplication",
+      "name": "PawWork",
+      "applicationCategory": "BusinessApplication",
+      "operatingSystem": "macOS, Windows",
+      "inLanguage": lang === "cn" ? "zh-CN" : "en",
+      "description": description,
+      "url": "https://pawwork.ai",
+      "downloadUrl": "https://github.com/Astro-Han/pawwork/releases/latest",
+      "license": "https://github.com/Astro-Han/pawwork/blob/main/LICENSE",
+      "author": { "@type": "Organization", "name": "Astro-Han", "url": "https://github.com/Astro-Han" },
+      "sameAs": ["https://github.com/Astro-Han/pawwork"],
+      "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+      "isAccessibleForFree": true
+    }).replace(/</g, "\\u003c")} />
+
+    {/* Set the theme before first paint so dark-mode users don't see a light flash */}
+    <script is:inline>
+      (function () {
+        try {
+          var qs = new URLSearchParams(location.search);
+          var stored = localStorage.getItem("pw-theme");
+          var mq = window.matchMedia("(prefers-color-scheme: dark)");
+          var theme = qs.get("theme") || stored || (mq.matches ? "dark" : "light");
+          if (theme !== "dark" && theme !== "light") theme = "light";
+          document.documentElement.setAttribute("data-theme", theme);
+        } catch (e) {}
+      })();
+    </script>
+  </head>
+  <body>
+    <slot />
+  </body>
+</html>

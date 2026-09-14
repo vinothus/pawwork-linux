@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=PawWork
+GenericName=Desktop AI Agent
+Comment=Open-source desktop AI agent for knowledge workers (Linux test build)
+Exec=/usr/local/bin/run-pawwork.sh
+Icon=/app/pawwork/packages/desktop-electron/resources/icons/icon.png
+Terminal=false
+Categories=Office;Utility;Network;
+StartupNotify=true
+StartupWMClass=PawWork
