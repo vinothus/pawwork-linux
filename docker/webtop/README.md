@@ -74,6 +74,76 @@ docker compose -f docker/webtop/docker-compose.yml up -d --build
 # or: podman compose -f docker/webtop/docker-compose.yml up -d --build
 ```
 
+## Install into an existing running webtop container (no rebuild)
+
+Already have a webtop container running (e.g. `lscr.io/linuxserver/webtop:ubuntu-kde`)
+and don't want to build a separate image? Install PawWork straight into it.
+Verified on 2026-09-14 on an Oracle Linux 9 host (rootless podman 5.8, existing
+`webtop` container, ports 3000/3001 already mapped).
+
+```bash
+# 1. get the code on the host (or clone straight inside the container)
+git clone <your-fork-url> pawwork          # containing this branch (linux-support)
+# e.g. git clone https://github.com/Astro-Han/pawwork && git checkout linux-support
+
+# 2. copy it into the running container
+docker/podman exec webtop mkdir -p /app
+docker/podman cp pawwork webtop:/app/pawwork
+
+# 3. install Node 24 + pnpm + build inside the container
+docker/podman exec -i webtop bash -s <<'EOF'
+set -e
+curl -fsSL -o /tmp/node.tar.xz https://nodejs.org/dist/v24.21.0/node-v24.21.0-linux-x64.tar.xz
+tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 && rm /tmp/node.tar.xz
+npm install -g pnpm@11.23.0
+cd /app/pawwork
+pnpm install --frozen-lockfile
+pnpm --filter @pawwork/desktop build
+EOF
+
+# 4. install the launcher (it already lives in the repo copy at /app/pawwork)
+docker/podman exec webtop bash -c 'install -m755 -o abc -g abc /app/pawwork/docker/webtop/run-pawwork.sh /usr/local/bin/run-pawwork.sh'
+
+# 5. create the app-menu entry
+docker/podman exec webtop bash -c 'cat > /usr/share/applications/pawwork.desktop <<EOF
+[Desktop Entry]
+Type=Application
+Name=PawWork
+Exec=/bin/bash -c "/usr/local/bin/run-pawwork.sh >/config/.pawwork-launch.log 2>&1"
+Icon=/app/pawwork/packages/desktop-electron/resources/icons/dock.png
+Terminal=false
+Categories=Development;
+EOF'
+
+# 6. create the desktop-icon shortcut (user abc owns /config)
+docker/podman exec webtop bash -c 'cat > /config/Desktop/pawwork.desktop <<EOF
+[Desktop Entry]
+Type=Application
+Name=PawWork
+Exec=/bin/bash -c "/usr/local/bin/run-pawwork.sh >/config/.pawwork-launch.log 2>&1"
+Icon=/app/pawwork/packages/desktop-electron/resources/icons/dock.png
+Terminal=false
+Categories=Development;
+EOF
+chown abc:abc /config/Desktop/pawwork.desktop && chmod 755 /config/Desktop/pawwork.desktop'
+```
+
+**Launch & verify** (no autostart — the webtop session is openbox-based and does
+not process XDG user autostart):
+
+```bash
+# click the PawWork icon on the desktop (or App menu → PawWork), then:
+docker/podman exec webtop cat /config/.pawwork-launch.log     # "[pawwork] launching ... app starting ..."
+docker/podman exec webtop ps aux | grep -E "electron|lib/bin.js"
+# browser: http://<host>:3000  (login: vinoth / Vindec@2026)
+```
+
+Optional: snapshot the ready container so the install survives recreation:
+
+```bash
+docker/podman commit webtop webtop-pawwork
+```
+
 ## Verifying the UI
 
 1. Open <http://localhost:3000> and sign in (basic auth).
@@ -108,10 +178,11 @@ Prefer an HMR dev server instead? Set `PAWWORK_RUN_MODE=dev` (compose
 
 - **XFCE (default, recommended for Electron/X11)**: `ubuntu-xfce` — used by
   default, Xvfb + X11, no extra flags.
-- **KDE**: current `ubuntu-kde` webtop images are **Wayland-only**. To use it:
-  - `docker build --build-arg BASE_IMAGE=lscr.io/linuxserver/webtop:ubuntu-kde -f docker/webtop/Dockerfile -t pawwork-linux-test .`
-  - run with `-e PIXELFLUX_WAYLAND=true`; the launcher detects `WAYLAND_DISPLAY`
-    and adds `--ozone-platform=wayland` automatically.
+- **KDE**: current `ubuntu-kde` webtop images ship a **Wayland** Plasma and
+  an X11 session (`DISPLAY=:1`, via Xwayland). In practice Electron launches
+  fine with plain `DISPLAY=:1` — verified on `ubuntu-kde` 2026-09-14, no
+  Wayland flags needed. The launcher still adds `--ozone-platform=wayland`
+  automatically if `WAYLAND_DISPLAY` happens to be set.
 
 ## Verified working on Linux (2026-09-14)
 
@@ -121,6 +192,14 @@ Built and run on Docker Desktop (Linux engine, amd64). Verified:
 - PawWork auto-launches on the desktop — window titled **PawWork** (`WM_CLASS pawwork-desktop`) confirmed via `wmctrl -l -x`
 - **Project CI smoke passes inside the container** (`pnpm exec tsx scripts/ci-smoke.ts raw` with `ELECTRON_DISABLE_SANDBOX=1`):
   `verified DSH product UI, free-model routing, and bundled skills` · `free-model turn on opencode/big-pickle: answered` · `verified DSH session persistence and dangling host-link repair after restart` · `verified V1 session and Automation migration after restart`
+- **Also verified on a real remote Linux box** (Oracle Linux 9 / 5.1k kernel,
+  rootless podman 5.8.2, `pods` via pasta) on 2026-09-14: cloned the branch,
+  installed Node 24 + pnpm 11.23 + `pnpm install` + desktop build **inside an
+  already-running `lscr.io/linuxserver/webtop:ubuntu-kde` container**, launched
+  via the desktop shortcut — `[pawwork] launching ... app starting { version:
+  '2026.9.7', packaged: false }` + DSH sidecar confirmed. No autostart needed
+  (openbox session); the shortcut + app-menu entry are enough. See
+  [Install into an existing running webtop container](#install-into-an-existing-running-webtop-container-no-rebuild).
 
 ### Linux fix included in this branch
 
@@ -130,9 +209,9 @@ started by script path (`electron out/main/index.js` — how the smoke harness
 launches it) reports the default-app version `"0.0"`; macOS/Windows fall back to
 a bundle version, so only Linux hit the `App version is not a valid semver
 version: "0.0"` crash at import. Since every updater use is gated behind
-`UPDATER_ACTIVE`, the app now normalizes the version (`app.setVersion("0.0.0")`)
-when `app.getVersion()` is not valid semver, instead of letting an inactive
-updater take the process down.
+`UPDATER_ACTIVE`, the app now touches `pkg.autoUpdater` lazily inside a
+`autoUpdater()` function only on the gated paths, so an inactive updater can
+never take the process down.
 
 ## Notes & gotchas
 
@@ -148,6 +227,10 @@ updater take the process down.
   try a simpler password.
 - **No auth**: if you drop `CUSTOM_USER`/`PASSWORD`, the web UI is open — fine
   on a trusted network only.
+- **Rootless podman restart race**: `podman restart webtop` can fail with
+  `Failed to bind port 3000 (Address already in use)` because the previous
+  instance's port-forwarder (`pasta`) hasn't released the port yet. Wait a few
+  seconds (or `pkill -9 -x pasta`) and `podman start webtop` again.
 - First boot takes ~30–60 s (desktop + PawWork start); the PawWork window then
   opens automatically.
 
