@@ -1,7 +1,7 @@
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { refreshOpenCodeFreeModels } = require('./opencode-free.cjs');
+const { applyOpenCodeSidecarRouting, refreshOpenCodeFreeModels } = require('./opencode-free.cjs');
 const { createDesktopHost, registerCommunityMarketRoutes } = require('./desktop-host.cjs');
 
 export const name = "pawwork-product"
@@ -34,6 +34,15 @@ function runRefresh(ctx, controller) {
 }
 
 async function runStartupRefresh(ctx, controller, retryIndex = 0) {
+	await applyOpenCodeSidecarRouting({
+		settings: ctx.settings,
+		logger: ctx.logger,
+		signal: controller.signal,
+	}).catch((error) => {
+		ctx.logger.warn?.(
+			`OpenCode sidecar routing failed: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	});
 	const refreshed = await runRefresh(ctx, controller);
 	if (refreshed !== undefined || controller.signal.aborted) return;
 	const delay = STARTUP_RETRY_DELAYS_MS[retryIndex];

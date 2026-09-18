@@ -73,6 +73,7 @@ RUN pnpm install --frozen-lockfile
 # Full source, then the desktop build (electron-vite build -> out/).
 # ---------------------------------------------------------------------------
 COPY . .
+RUN pnpm --filter @pawwork/desktop exec tsx ./scripts/prepare-opencode.ts --platform linux --arch x64
 RUN pnpm --filter @pawwork/desktop build
 
 # ---------------------------------------------------------------------------

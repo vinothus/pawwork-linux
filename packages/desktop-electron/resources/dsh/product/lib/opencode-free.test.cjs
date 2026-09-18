@@ -144,6 +144,50 @@ test('waitForNamespace returns promptly when aborted', { timeout: 1000 }, async 
 	assert.equal(value, undefined);
 });
 
+test('applyOpenCodeSidecarRouting rewrites persisted direct Zen URLs immediately', async () => {
+	const previous = process.env.PAWWORK_OPENCODE_ZEN_BASE_URL;
+	process.env.PAWWORK_OPENCODE_ZEN_BASE_URL = 'http://127.0.0.1:41741/v1';
+	try {
+		const { settings, writes } = settingsHarness({
+			providers: {
+				opencode: {
+					api: 'openai-completions',
+					baseURL: 'https://opencode.ai/zen/v1',
+					models: [{ id: 'big-pickle' }],
+				},
+			},
+		});
+		const { applyOpenCodeSidecarRouting } = require('./opencode-free.cjs');
+		const applied = await applyOpenCodeSidecarRouting({ settings });
+		assert.equal(applied, true);
+		assert.deepEqual(writes[0].ops, [
+			{ op: 'set', path: ['providers', 'opencode', 'baseURL'], value: 'http://127.0.0.1:41741/v1' },
+		]);
+	} finally {
+		if (previous === undefined) delete process.env.PAWWORK_OPENCODE_ZEN_BASE_URL;
+		else process.env.PAWWORK_OPENCODE_ZEN_BASE_URL = previous;
+	}
+});
+
+test('refresh routes completions through the OpenCode sidecar when configured', async () => {
+	const previous = process.env.PAWWORK_OPENCODE_ZEN_BASE_URL;
+	process.env.PAWWORK_OPENCODE_ZEN_BASE_URL = 'http://127.0.0.1:41741/v1';
+	try {
+		const { settings, writes } = settingsHarness({ providers: { opencode: { models: [{ id: 'old' }] } } });
+		const fetchImpl = fetchCatalog({ 'hy3-free': { cost: { input: 0, output: 0 } } });
+		const count = await refreshOpenCodeFreeModels({ settings, fetchImpl });
+		assert.equal(count, 1);
+		assert.deepEqual(writes[0].ops, [
+			{ op: 'set', path: ['providers', 'opencode', 'api'], value: 'openai-completions' },
+			{ op: 'set', path: ['providers', 'opencode', 'baseURL'], value: 'http://127.0.0.1:41741/v1' },
+			{ op: 'set', path: ['providers', 'opencode', 'models'], value: [{ id: 'hy3-free' }] },
+		]);
+	} finally {
+		if (previous === undefined) delete process.env.PAWWORK_OPENCODE_ZEN_BASE_URL;
+		else process.env.PAWWORK_OPENCODE_ZEN_BASE_URL = previous;
+	}
+});
+
 test('refresh writes free non-deprecated models with serviceable route wiring', async () => {
 	const { settings, writes } = settingsHarness({ providers: { opencode: { models: [{ id: 'old' }] } } });
 	const fetchImpl = fetchCatalog({

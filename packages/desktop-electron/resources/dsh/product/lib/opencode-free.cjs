@@ -14,6 +14,11 @@ const OPENCODE_MODELS_URL = 'https://models.dev/api.json';
 /** The settings namespace the pi-ai adapter owns. */
 const LLM_PI_AI_NAMESPACE = 'llm-pi-ai';
 const OPENCODE_ROUTE_BASE_URL = 'https://opencode.ai/zen/v1';
+/** Completions-route base URL: localhost wrap when the OpenCode sidecar is active. */
+function opencodeCompletionsBaseURL() {
+	const sidecar = process.env.PAWWORK_OPENCODE_ZEN_BASE_URL;
+	return typeof sidecar === 'string' && sidecar.length > 0 ? sidecar : OPENCODE_ROUTE_BASE_URL;
+}
 /**
  * The zen gateway serves one wire protocol per model, not one per gateway: a
  * model reached on the wrong endpoint answers 500 on every attempt. A pi-ai
@@ -200,6 +205,30 @@ async function waitForNamespace(get, timeoutMs, signal) {
 	}
 }
 /**
+ * Point the completions route at the bundled OpenCode sidecar as soon as the
+ * settings namespace exists. Persisted settings.yaml from an older build can
+ * still name the direct Zen URL; waiting for the catalog refresh leaves a race
+ * where the first turn hits that stale baseURL.
+ */
+async function applyOpenCodeSidecarRouting({ settings, logger, signal, timeoutMs }) {
+	const sidecar = opencodeCompletionsBaseURL();
+	if (sidecar === OPENCODE_ROUTE_BASE_URL) return false;
+	const value = await waitForNamespace((ns) => settings.get(ns), timeoutMs, signal);
+	if (value === undefined) return false;
+	const descriptor = settings.describe?.().find((entry) => entry.ns === LLM_PI_AI_NAMESPACE);
+	const currentValue = descriptor?.value ?? value;
+	const current = currentValue?.providers?.opencode;
+	if (current?.baseURL === sidecar && current?.api === 'openai-completions') return false;
+	const ops = [{ op: 'set', path: ['providers', 'opencode', 'baseURL'], value: sidecar }];
+	if (current?.api !== 'openai-completions') {
+		ops.unshift({ op: 'set', path: ['providers', 'opencode', 'api'], value: 'openai-completions' });
+	}
+	await settings.mutate(LLM_PI_AI_NAMESPACE, ops, descriptor?.revision);
+	logger?.info?.(`OpenCode Free routed through sidecar at ${sidecar}`);
+	return true;
+}
+
+/**
  * Refresh the OpenCode Free model list in the `llm-pi-ai` settings namespace.
  *
  * A fetch/parse failure or an empty usable set leaves the packaged list
@@ -253,14 +282,15 @@ async function refreshOpenCodeFreeModels({ settings, defaultModel, logger, fetch
 		const currentProvider = currentValue?.providers?.[route];
 		// Skip the write when the live profiles and routing already match: a periodic
 		// refresh must not churn settings.yaml or rebuild the adapter every interval.
+		const routeBaseURL = route === 'opencode' ? opencodeCompletionsBaseURL() : OPENCODE_ROUTE_BASE_URL;
 		const unchanged = Array.isArray(currentProvider?.models)
 			&& currentProvider?.api === api
-			&& currentProvider?.baseURL === OPENCODE_ROUTE_BASE_URL
+			&& currentProvider?.baseURL === routeBaseURL
 			&& isDeepStrictEqual(currentProvider.models, merged[route]);
 		if (unchanged) continue;
 		ops.push(
 			{ op: 'set', path: ['providers', route, 'api'], value: api },
-			{ op: 'set', path: ['providers', route, 'baseURL'], value: OPENCODE_ROUTE_BASE_URL },
+			{ op: 'set', path: ['providers', route, 'baseURL'], value: routeBaseURL },
 			{ op: 'set', path: ['providers', route, 'models'], value: merged[route] },
 		);
 	}
@@ -280,6 +310,8 @@ async function refreshOpenCodeFreeModels({ settings, defaultModel, logger, fetch
 module.exports = {
 	OPENCODE_ROUTES,
 	OPENCODE_ROUTE_BASE_URL,
+	opencodeCompletionsBaseURL,
+	applyOpenCodeSidecarRouting,
 	isZeroCost,
 	refreshOpenCodeFreeModels,
 	selectFreeAndServed,

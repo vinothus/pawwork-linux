@@ -84,6 +84,9 @@ jobs:
       - name: Prepare bundled uv
         run: pnpm exec tsx ./scripts/prepare-uv.ts --platform ${{ matrix.platform }} --arch ${{ matrix.arch }}
         working-directory: packages/desktop-electron
+      - name: Prepare bundled opencode
+        run: pnpm exec tsx ./scripts/prepare-opencode.ts --platform ${{ matrix.platform }} --arch ${{ matrix.arch }}
+        working-directory: packages/desktop-electron
       - name: Build desktop
         run: pnpm run build
         working-directory: packages/desktop-electron

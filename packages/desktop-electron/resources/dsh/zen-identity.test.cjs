@@ -130,6 +130,24 @@ test('apply wraps global fetch once', async () => {
   }
 });
 
+test('Node --import skips zen identity when the OpenCode sidecar is active', () => {
+  const result = spawnSync(
+    process.execPath,
+    [
+      '--import',
+      SIDECAR_PRELOAD_HREF,
+      '-e',
+      'process.stdout.write(String(Boolean(globalThis.fetch && globalThis.fetch.__pawworkZenIdentity)))',
+    ],
+    {
+      encoding: 'utf8',
+      env: { ...process.env, PAWWORK_OPENCODE_ZEN_BASE_URL: 'http://127.0.0.1:41741/v1' },
+    },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, 'false');
+});
+
 test('Node --import wraps fetch before the entry runs', () => {
   const result = spawnSync(
     process.execPath,

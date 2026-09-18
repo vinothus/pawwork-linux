@@ -299,6 +299,7 @@ jobs:
           esac
 
           pnpm exec tsx ./scripts/prepare-uv.ts --platform "$uv_platform" --arch "${{ matrix.arch_label }}"
+          pnpm exec tsx ./scripts/prepare-opencode.ts --platform "$uv_platform" --arch "${{ matrix.arch_label }}"
         working-directory: packages/desktop-electron
 
       - name: Resolve packaged app paths

@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
-import { mkdirSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { rm } from "node:fs/promises"
 import { createRequire } from "node:module"
 import { homedir } from "node:os"
@@ -33,6 +33,12 @@ import {
   resolveProductResources,
 } from "./dsh-product-home"
 import { deferDshRun, launchDshSidecar } from "./dsh-sidecar"
+import {
+  launchOpencodeSidecar,
+  resolveBundledOpencodeExecutable,
+  resolveOpencodeWrapScript,
+  type OpencodeSidecarRun,
+} from "./opencode-sidecar"
 import { prepareDshToolsEnvironment } from "./dsh-tools"
 import { failingProfileBundle, removeProfileBundle } from "./dsh-profile-repair"
 import { migrateDshHome, resolveDshHome } from "./pawwork-home"
@@ -617,6 +623,7 @@ function launchDsh() {
     resolveDevelopmentPackage: () => require.resolve("pnpm"),
   })
   const dshBin = join(dirname(dshPackage), "lib", "bin.js")
+  const productToolsDir = join(dirname(productResources.dsh), "tools")
   const environment = prepareDshToolsEnvironment({
     dshBin,
     env: buildDshEnvironment(productResources.skills),
@@ -624,21 +631,49 @@ function launchDsh() {
     home: product.home,
     hostToken: dshHostToken,
     pnpmBin: join(dirname(pnpmPackage), "bin", "pnpm.mjs"),
-    productToolsDir: join(dirname(productResources.dsh), "tools"),
+    productToolsDir,
   })
+  const opencodeExecutable = resolveBundledOpencodeExecutable(productToolsDir)
+  const opencodeWrapScript = resolveOpencodeWrapScript(productResources.dsh)
+  let opencodeSidecar: OpencodeSidecarRun | undefined
 
-  return deferDshRun((signal) => ensureVerifiedCommunityMarket({
-    dshBin,
-    env: environment,
-    executable: process.execPath,
-    profileDir: join(product.home, "profiles", "web"),
-    spawn: (executable, args, options) => spawn(executable, args, options),
-    signal,
-    onUpgradeStart: () => showStartupPage(MARKET_UPGRADE_NOTICE[menuLocale]),
-    log: (message, detail) => logger.log(message, detail),
-  }), () => {
+  return deferDshRun(async (signal) => {
+    await ensureVerifiedCommunityMarket({
+      dshBin,
+      env: environment,
+      executable: process.execPath,
+      profileDir: join(product.home, "profiles", "web"),
+      spawn: (executable, args, options) => spawn(executable, args, options),
+      signal,
+      onUpgradeStart: () => showStartupPage(MARKET_UPGRADE_NOTICE[menuLocale]),
+      log: (message, detail) => logger.log(message, detail),
+    })
+    if (signal.aborted) return
+    if (!existsSync(opencodeExecutable)) {
+      logger.warn("bundled OpenCode binary is missing; free-tier models will use direct Zen routing", {
+        opencodeExecutable,
+      })
+      return
+    }
+    logger.log("spawning OpenCode sidecar")
+    opencodeSidecar = await launchOpencodeSidecar({
+      nodeExecutable: process.execPath,
+      wrapScript: opencodeWrapScript,
+      opencodeExecutable,
+      cwd: product.home,
+      env: environment,
+      onStdout: (chunk) => logger.log("OpenCode wrap stdout", { chunk: chunk.trimEnd() }),
+      onStderr: (chunk) => logger.error("OpenCode wrap stderr", chunk.trimEnd()),
+      onError: (error) => logger.error("OpenCode sidecar process error", error),
+    })
+    signal.addEventListener("abort", () => {
+      void opencodeSidecar?.stop()
+    })
+    environment.PAWWORK_OPENCODE_ZEN_BASE_URL = await opencodeSidecar.ready
+    logger.log("OpenCode sidecar ready", { baseURL: environment.PAWWORK_OPENCODE_ZEN_BASE_URL })
+  }, () => {
     logger.log("spawning DSH sidecar")
-    return launchDshSidecar({
+    const dsh = launchDshSidecar({
       executable: process.execPath,
       dshBin,
       sidecarPreload: pathToFileURL(product.sidecarPreload).href,
@@ -652,6 +687,14 @@ function launchDsh() {
       },
       onError: (error) => logger.error("DSH sidecar process error", error),
     })
+    return {
+      ready: dsh.ready,
+      exited: dsh.exited,
+      stop: async () => {
+        await dsh.stop()
+        await opencodeSidecar?.stop()
+      },
+    }
   })
 }
 

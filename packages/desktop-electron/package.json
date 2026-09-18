@@ -17,9 +17,10 @@
     "dev": "electron-vite dev",
     "prebuild": "tsx ./scripts/generate-icons.ts",
     "build": "electron-vite build",
-    "package": "tsx ./scripts/prepare-uv.ts && pnpm run build && electron-builder --config electron-builder.config.ts",
+    "prepare:tools": "tsx ./scripts/prepare-uv.ts && tsx ./scripts/prepare-opencode.ts",
+    "package": "pnpm run prepare:tools && pnpm run build && electron-builder --config electron-builder.config.ts",
     "package:mac": "tsx ./scripts/prepare-uv.ts --platform darwin && pnpm run build && electron-builder --mac --config.mac.notarize=false --config electron-builder.config.ts",
-    "package:win": "tsx ./scripts/prepare-uv.ts --platform win32 --arch x64 && pnpm run build && electron-builder --win --config electron-builder.config.ts"
+    "package:win": "tsx ./scripts/prepare-uv.ts --platform win32 --arch x64 && tsx ./scripts/prepare-opencode.ts --platform win32 --arch x64 && pnpm run build && electron-builder --win --config electron-builder.config.ts"
   },
   "main": "./out/main/index.js",
   "dependencies": {

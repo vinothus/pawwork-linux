@@ -1,4 +1,18 @@
 {
+  "opencode": {
+    "version": "v1.18.31",
+    "repo": "anomalyco/opencode",
+    "assets": {
+      "win32-x64": {
+        "name": "opencode-windows-x64.zip",
+        "sha256": "0ecd7ffc7f26390ce7799e7bcd409e4f11c410144308a6a5b0fcdce63d871006"
+      },
+      "linux-x64": {
+        "name": "opencode-linux-x64.tar.gz",
+        "sha256": "e9312be75ed803b7415fc2aeabda1f4fe938912a39673762dc0c38c0e11ebde4"
+      }
+    }
+  },
   "uv": {
     "version": "0.12.5",
     "repo": "astral-sh/uv",

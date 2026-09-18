@@ -22,9 +22,9 @@
         apiKeyEnv: OPENCODE_API_KEY
         displayName: OpenCode Free
         api: openai-completions
-        baseURL: https://opencode.ai/zen/v1
+        baseURL: !!js process.env.PAWWORK_OPENCODE_ZEN_BASE_URL || 'https://opencode.ai/zen/v1'
         compat:
-          sendSessionAffinityHeaders: true
+          sendSessionAffinityHeaders: !!js process.env.PAWWORK_OPENCODE_ZEN_BASE_URL ? false : true
         models:
           - id: big-pickle
           - id: ling-3.0-flash-fin-free
